@@ -1,6 +1,7 @@
 services:
   m365copilot2api:
-    build: .
+    image: ghcr.io/scluzlep/m365copilot2api:latest
+    container_name: m365copilot2api
     ports:
       - "8000:8000"
     env_file:
