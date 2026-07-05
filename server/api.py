@@ -275,31 +275,32 @@ if os.path.exists("/usr/share/novnc"):
             await websocket.close()
             return
             
-        async def forward(ws_receive, tcp_send):
+        async def ws_to_tcp():
             try:
                 while True:
-                    data = await ws_receive()
-                    tcp_send(data)
-                    await asyncio.sleep(0.001)
+                    data = await websocket.receive_bytes()
+                    writer.write(data)
+                    await writer.drain()
             except Exception:
                 pass
 
-        async def reverse(tcp_receive, ws_send):
+        async def tcp_to_ws():
             try:
                 while True:
-                    data = await tcp_receive(4096)
+                    data = await reader.read(4096)
                     if not data:
                         break
-                    await ws_send(data)
-                    await asyncio.sleep(0.001)
+                    await websocket.send_bytes(data)
             except Exception:
                 pass
                 
+        t1 = asyncio.create_task(ws_to_tcp())
+        t2 = asyncio.create_task(tcp_to_ws())
+        
         try:
-            await asyncio.gather(
-                forward(websocket.receive_bytes, writer.write),
-                reverse(reader.read, websocket.send_bytes)
-            )
+            done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
+            for p in pending:
+                p.cancel()
         finally:
             writer.close()
             await writer.wait_closed()
