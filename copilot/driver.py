@@ -524,6 +524,25 @@ class Copilot(AbstractProvider):
                                 continue
 
                             msg_obj = arg.get("messages", [{}])[0]
+                            
+                            # Extract citations from sourceAttributions
+                            source_attrs = msg_obj.get("sourceAttributions", [])
+                            if source_attrs:
+                                citations = {}
+                                for attr in source_attrs:
+                                    url = attr.get("seeMoreUrl")
+                                    name = attr.get("providerDisplayName", "")
+                                    meta_str = attr.get("referenceMetadata", "{}")
+                                    try:
+                                        meta = json.loads(meta_str)
+                                        ref_id = meta.get("citationRefId") or meta.get("referenceId")
+                                        if ref_id and url:
+                                            citations[ref_id] = {"url": url, "name": name}
+                                    except Exception:
+                                        pass
+                                if citations:
+                                    yield {"citations": citations}
+
                             server_text = msg_obj.get("text", "")
                             if not server_text and "hiddenText" in msg_obj:
                                 server_text = msg_obj["hiddenText"]

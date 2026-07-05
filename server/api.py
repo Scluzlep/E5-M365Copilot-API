@@ -37,15 +37,45 @@ import re
 class StreamCleaner:
     def __init__(self):
         self.buffer = ""
+        self.citations = {}
+        self.ref_map = {}
+        self.ref_counter = 1
+
+    def add_citations(self, citations: dict):
+        self.citations.update(citations)
+
+    def _replace_citations(self, match) -> str:
+        cite_block = match.group(0)
+        # 提取其中所有的 turnXsearchY
+        refs = re.findall(r'turn\d+search\d+', cite_block)
+        if not refs:
+            return ""
+        
+        replacements = []
+        for ref in refs:
+            if ref not in self.ref_map:
+                self.ref_map[ref] = self.ref_counter
+                self.ref_counter += 1
+            idx = self.ref_map[ref]
+            
+            cite_info = self.citations.get(ref)
+            if cite_info and cite_info.get("url"):
+                # Markdown 链接格式 [1](https://...)
+                replacements.append(f"[[{idx}]]({cite_info['url']})")
+            else:
+                # 纯数字兜底 [1]
+                replacements.append(f"[{idx}]")
+                
+        return "".join(replacements)
 
     def process(self, chunk: str) -> str:
         self.buffer += chunk
         self.buffer = re.sub(r'【\d+-[a-zA-Z0-9]+】', '', self.buffer)
         
         # New Copilot cite format: citeturn1search20 (\ue200cite\ue202turn...\ue201)
-        self.buffer = re.sub(r'\ue200cite(?:\ue202turn\d+search\d+)+\ue201', '', self.buffer)
+        self.buffer = re.sub(r'\ue200cite((?:\ue202turn\d+search\d+)+)\ue201', self._replace_citations, self.buffer)
         # Old cite format fallback / Strip unicode-stripped remnants
-        self.buffer = re.sub(r'\u200b?cite(?:turn\d+search\d+)+\u200b?', '', self.buffer)
+        self.buffer = re.sub(r'\u200b?cite((?:turn\d+search\d+)+)\u200b?', self._replace_citations, self.buffer)
         self.buffer = self.buffer.replace('\u200b', '')
         
         idx_bracket = self.buffer.rfind('【')
@@ -75,8 +105,8 @@ class StreamCleaner:
 
     def flush(self) -> str:
         self.buffer = re.sub(r'【\d+-[a-zA-Z0-9]+】', '', self.buffer)
-        self.buffer = re.sub(r'\ue200cite(?:\ue202turn\d+search\d+)+\ue201', '', self.buffer)
-        self.buffer = re.sub(r'\u200b?cite(?:turn\d+search\d+)+\u200b?', '', self.buffer)
+        self.buffer = re.sub(r'\ue200cite((?:\ue202turn\d+search\d+)+)\ue201', self._replace_citations, self.buffer)
+        self.buffer = re.sub(r'\u200b?cite((?:turn\d+search\d+)+)\u200b?', self._replace_citations, self.buffer)
         self.buffer = re.sub(r'\ue200.*', '', self.buffer)
         return self.buffer.replace('\u200b', '')
 
@@ -100,9 +130,12 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
                 final_text += cleaned_piece
                 if cleaned_piece:
                     yield sse_event(stream_chunk(cid, created, model, {"content": cleaned_piece}))
-            elif isinstance(piece, dict) and "thought" in piece:
-                final_thought += piece["thought"]
-                yield sse_event(stream_chunk(cid, created, model, {"reasoning_content": piece["thought"]}))
+            elif isinstance(piece, dict):
+                if "thought" in piece:
+                    final_thought += piece["thought"]
+                    yield sse_event(stream_chunk(cid, created, model, {"reasoning_content": piece["thought"]}))
+                elif "citations" in piece:
+                    cleaner.add_citations(piece["citations"])
             elif isinstance(piece, ImageResponse) and piece.url:
                 markdown_img = f"\n\n![Generated Image]({piece.url})\n\n"
                 final_text += markdown_img
