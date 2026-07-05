@@ -1,0 +1,14 @@
+.git
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+docs/
+config.json
+test.py
+main.py
+# Keep session secrets (cookies + token) out of the built image. Compose
+# bind-mounts ./session back in at runtime, so the server still sees it.
+session/
+tests/
+examples/

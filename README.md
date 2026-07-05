@@ -1,8 +1,8 @@
 
 
-# Windows Copilot API: a free LLM API powered by Microsoft Copilot
+# E5 M365 Copilot API: a free LLM API powered by Microsoft Copilot
 
-![Windows Copilot API — a free, OpenAI-compatible API for your Microsoft Copilot account](assets/windows-copilot-api-banner.png)
+![E5 M365 Copilot API — a free, OpenAI-compatible API for your Microsoft Copilot account](assets/windows-copilot-api-banner.png)
 
 **Using your own Microsoft Copilot account.** No API key, no credits, no paid plan: it turns the free chat at [copilot.microsoft.com](https://copilot.microsoft.com) into an API you can call from code.
 
@@ -59,7 +59,7 @@ You sign in once in a browser with your Microsoft **or Google** account; your se
 ```bash
 # 1. Clone the project
 git clone <your-repo-url>
-cd Windows-Copilot-API
+cd E5-M365Copilot-API
 ```
 
 **2. Create and activate a virtual environment**

@@ -20,6 +20,17 @@ Code is split by concern:
 """
 
 import os
+import pathlib
+
+# Automatically load .env file if running locally (Docker handles this automatically)
+_env_path = pathlib.Path(".env")
+if _env_path.exists():
+    with open(_env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
 
 from .api import app as _api
 
@@ -32,20 +43,12 @@ def app(host=None, port=None) -> None:
     """
     import uvicorn
 
-    from copilot.auth import load_auth
-
     if host is None:
         host = os.environ.get("HOST", "127.0.0.1")
     if port is None:
         port = int(os.environ.get("PORT", "8000"))
 
-    # Ensure a signed-in Copilot session exists before we start serving. On the
-    # very first run this triggers the interactive browser sign-in (instead of
-    # letting the first HTTP request fail), then caches it for reuse.
-    try:
-        load_auth()
-    except Exception as exc:
-        print(f"Warning: could not establish a Copilot session: {exc}")
+
 
     print(f"Copilot OpenAI-compatible API on http://{host}:{port}  (POST /v1/chat/completions)")
     uvicorn.run(_api, host=host, port=port)

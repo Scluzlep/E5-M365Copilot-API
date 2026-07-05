@@ -13,5 +13,5 @@ x11vnc -display $DISPLAY -nopw -listen localhost -xkb -ncache 10 -ncache_cr -for
 
 
 # Start the FastAPI server
-echo "Starting Copilot API Server on port 8000..."
-python app.py
+echo "Starting E5 M365 Copilot API Server on port 8000..."
+python -m server

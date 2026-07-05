@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# All session state: persistent browser profile (cookies, Cloudflare
+# clearance, sign-in) + cached auth token. Secret.
+session/
+docs/
+
+# Local config / secrets
+config.json
+
+# Dev files
+test.py
+main.py
+CLAUDE.md
+
+# Playwright local browsers
+.browsers/
+.env

@@ -17,7 +17,6 @@ from .openai_format import (
     stream_chunk,
 )
 from .prompt import messages_to_prompt
-from .ratelimit import TokenBucket
 from .schemas import ChatCompletionRequest
 from .router import router
 
@@ -29,34 +28,9 @@ _AUTH_HELP = (
     "Please re-login: run `python -m copilot login` or ensure your session/profile has a valid E5 login."
 )
 
-# Self-imposed rate limit on top of the concurrency lock below: this caps
-# requests-per-minute, the lock caps requests-in-flight. See server/ratelimit.py.
-_rate_limiter = TokenBucket(RATE_LIMIT_RPM, RATE_LIMIT_BURST)
+# (Locks and rate limits are now managed per-account in server/accounts.py)
 
-
-def _rate_limited_response():
-    """Spend a token; return an OpenAI-shaped 429 if none left, else ``None``."""
-    allowed, wait = _rate_limiter.try_acquire()
-    if allowed:
-        return None
-    secs = max(1, round(wait))
-    return JSONResponse(
-        status_code=429,
-        headers={"Retry-After": str(secs)},
-        content={"error": {
-            "message": (
-                f"Rate limit exceeded (>{RATE_LIMIT_RPM:g} req/min). "
-                f"Retry in {secs}s."
-            ),
-            "type": "rate_limit_error",
-            "code": "rate_limit_exceeded",
-        }},
-    )
-
-# (Locks are now managed per-account in server/accounts.py)
-
-
-from .accounts import pool
+from .accounts import pool, RateLimitExceeded
 
 def _stream(api_key: str, prompt: str, model: str, messages: list, conversation_id=None, plugins=None):
     """Yield OpenAI ``chat.completion.chunk`` SSE events for ``prompt``.
@@ -94,6 +68,18 @@ def _stream(api_key: str, prompt: str, model: str, messages: list, conversation_
                     conversation_id=stream.conversation_id,
                 )
             )
+    except RateLimitExceeded as exc:
+        secs = max(1, round(exc.wait_seconds))
+        err_json = {
+            "error": {
+                "message": f"Rate limit exceeded. Retry in {secs}s.",
+                "type": "rate_limit_error",
+                "code": "rate_limit_exceeded"
+            }
+        }
+        # SSE format for openai errors is sometimes yielded in the 'error' field or as a JSON body,
+        # but since stream started, we just yield it as a pseudo message.
+        yield sse_event(stream_chunk(cid, created, model, {"content": f"\n[error: rate limit exceeded, retry in {secs}s]"}, finish="error"))
     except Exception as exc:  # surface errors to the client instead of hanging
         import traceback, sys
         print(f"[stream error] {traceback.format_exc()}", file=sys.stderr)
@@ -135,12 +121,6 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
         )
     model = req.model or MODEL_NAME
 
-    # Enforce the per-minute ceiling before touching the upstream lock, so excess
-    # callers get a fast 429 instead of piling up behind the serialized queue.
-    limited = _rate_limited_response()
-    if limited is not None:
-        return limited
-
     plugins = req.plugins or []
     if req.tools:
         for t in req.tools:
@@ -174,6 +154,17 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                 new_head_hash = router._hash_messages(updated_messages)
                 router.save_state(new_head_hash, reply.conversation_id)
             return completion_response(final_text, model, reply.conversation_id)
+    except RateLimitExceeded as exc:
+        secs = max(1, round(exc.wait_seconds))
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(secs)},
+            content={"error": {
+                "message": f"Rate limit exceeded. Retry in {secs}s.",
+                "type": "rate_limit_error",
+                "code": "rate_limit_exceeded",
+            }},
+        )
     except Exception as exc:
         import traceback, sys
         print(f"[chat error] {traceback.format_exc()}", file=sys.stderr)
@@ -224,7 +215,10 @@ class AddKeyRequest(BaseModel):
 
 @app.get("/api/accounts", dependencies=[Depends(verify_admin)])
 def get_accounts():
-    return {"api_keys": pool.get_api_keys()}
+    return {
+        "api_keys": pool.get_api_keys(),
+        "sessions_info": pool.get_sessions_info()
+    }
 
 @app.post("/api/accounts", dependencies=[Depends(verify_admin)])
 def add_account(req: AddKeyRequest):

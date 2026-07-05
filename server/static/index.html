@@ -80,12 +80,23 @@
                 sList.className = 'sessions-list';
                 
                 sessions.forEach(s => {
+                    const info = data.sessions_info ? data.sessions_info[s] : {status: "未知"};
+                    const isConfigured = info && info.status === "已配置";
+                    
                     const tag = document.createElement('div');
                     tag.className = 'session-tag';
+                    tag.style.background = isConfigured ? '#dcfce7' : '#fee2e2';
+                    tag.style.color = isConfigured ? '#166534' : '#991b1b';
                     
                     const tagText = document.createElement('span');
-                    tagText.innerText = s;
-                    tagText.title = "点击启动浏览器";
+                    const displayEmail = (info && info.email && info.email !== 'N/A') ? ` (${info.email})` : '';
+                    tagText.innerText = s + displayEmail;
+                    
+                    if (info) {
+                        tagText.title = `点击启动浏览器\n状态: ${info.status}\n邮箱: ${info.email || 'N/A'}\nTID: ${info.tid || 'N/A'}\nOID: ${info.oid || 'N/A'}`;
+                    } else {
+                        tagText.title = "点击启动浏览器";
+                    }
                     tagText.onclick = () => launchVnc(s);
                     
                     const delBtn = document.createElement('div');
