@@ -145,7 +145,7 @@ class BrowserCopilot:
         self,
         profile_dir: str = DEFAULT_PROFILE_DIR,
         headless: bool = True,
-        nav_timeout: int = 60,
+        nav_timeout: int = 180,
         proxy: Optional[str] = None,
     ):
         self.profile_dir = str(Path(profile_dir).resolve())
@@ -508,7 +508,7 @@ class BrowserCopilot:
         return False
 
     def acquire_chat_token(
-        self, timeout: int = 60, warmup: bool = True, signin_grace: int = 8
+        self, timeout: int = 180, warmup: bool = True, signin_grace: int = 8
     ) -> Optional[str]:
         """Return a usable chat token, minting it via a warm-up turn if needed.
 
@@ -706,7 +706,7 @@ class BrowserCopilot:
         return self._warmup_replied or (self._clearance_value() != before_clearance)
 
     def auto_clear(
-        self, path: str = DEFAULT_AUTH_FILE, warmup: bool = True, timeout: int = 60
+        self, path: str = DEFAULT_AUTH_FILE, warmup: bool = True, timeout: int = 180
     ) -> bool:
         """Refresh Cloudflare clearance for the pure-HTTP driver, then snapshot it.
 
