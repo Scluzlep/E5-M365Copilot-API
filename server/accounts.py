@@ -232,28 +232,45 @@ class AccountPool:
         if not session_names:
             raise ValueError(f"Invalid API Key: {api_key}")
             
-        bound_sessions = [self.sessions[s] for s in session_names if s in self.sessions and self.sessions[s].is_healthy()]
-        if not bound_sessions:
-            raise ValueError(f"API Key {api_key} has no valid bound sessions (tokens expired or malformed). Please login using python -m copilot login.")
+        all_sessions = [self.sessions[s] for s in session_names if s in self.sessions]
+        if not all_sessions:
+            raise ValueError(f"API Key {api_key} has no valid bound sessions.")
 
         acquired_session = None
         min_wait = float('inf')
-
-        # Fast path: Try non-blocking acquire on any bound session and check rate limit
-        for sess in bound_sessions:
+        
+        # Prioritize healthy sessions
+        all_sessions.sort(key=lambda s: not s.is_healthy())
+        
+        def try_acquire(sess) -> bool:
+            nonlocal min_wait
             if sess.lock.acquire(blocking=False):
                 allowed, wait = sess.rate_limiter.try_acquire()
                 if allowed:
-                    acquired_session = sess
-                    break
+                    if not sess.is_healthy():
+                        try:
+                            # Trigger Playwright headless renewal while locked
+                            sess.client._fresh_auth()
+                        except Exception as e:
+                            print(f"[Pool] Failed to renew session {sess.session_name}: {e}")
+                            sess.lock.release()
+                            return False
+                    return True
                 else:
                     sess.lock.release()
                     if wait < min_wait:
                         min_wait = wait
+            return False
+
+        # Fast path: Try non-blocking acquire on any bound session and check rate limit
+        for sess in all_sessions:
+            if try_acquire(sess):
+                acquired_session = sess
+                break
                 
         # Slow path: Use Condition variable to wait for a session to free up
         while not acquired_session:
-            any_busy = any(sess.lock.locked() for sess in bound_sessions)
+            any_busy = any(sess.lock.locked() for sess in all_sessions)
             
             if not any_busy:
                 # All unlocked but we couldn't get one -> Rate limit is the blocker
@@ -267,16 +284,11 @@ class AccountPool:
                 self._session_released_cv.wait(timeout=wait_time)
                 
             min_wait = float('inf')
-            for sess in bound_sessions:
-                if sess.lock.acquire(blocking=False):
-                    allowed, wait = sess.rate_limiter.try_acquire()
-                    if allowed:
-                        acquired_session = sess
-                        break
-                    else:
-                        sess.lock.release()
-                        if wait < min_wait:
-                            min_wait = wait
+            all_sessions.sort(key=lambda s: not s.is_healthy())
+            for sess in all_sessions:
+                if try_acquire(sess):
+                    acquired_session = sess
+                    break
             
         try:
             yield acquired_session
