@@ -1,6 +1,5 @@
-# Playwright needs Chromium + system libs. The official Playwright Python image
-# ships them preinstalled and matches our playwright>=1.60 pin.
-FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
+# Use a lightweight python slim image instead of the massive official playwright image
+FROM python:3.11-slim
 
 # Install VNC, Xvfb, fluxbox, and novnc for headless browser login
 RUN apt-get update && apt-get install -y \
@@ -15,8 +14,9 @@ WORKDIR /app
 
 # Install Python deps first so the layer caches across code changes.
 COPY requirements.txt .
+# Install pip dependencies, then use playwright to install ONLY chromium and its specific OS dependencies
 RUN pip install --no-cache-dir -r requirements.txt \
-    && python -m playwright install chromium
+    && playwright install --with-deps chromium
 
 COPY . .
 
