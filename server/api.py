@@ -281,7 +281,8 @@ if os.path.exists("/usr/share/novnc"):
                     data = await websocket.receive_bytes()
                     writer.write(data)
                     await writer.drain()
-            except Exception:
+            except Exception as e:
+                print(f"ws_to_tcp exception: {type(e).__name__} - {e}")
                 pass
 
         async def tcp_to_ws():
@@ -291,7 +292,8 @@ if os.path.exists("/usr/share/novnc"):
                     if not data:
                         break
                     await websocket.send_bytes(data)
-            except Exception:
+            except Exception as e:
+                print(f"tcp_to_ws exception: {type(e).__name__} - {e}")
                 pass
                 
         t1 = asyncio.create_task(ws_to_tcp())
