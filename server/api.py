@@ -49,6 +49,8 @@ def _stream(api_key: str, prompt: str, model: str, messages: list, conversation_
                 if isinstance(piece, str) and piece:
                     final_text += piece
                     yield sse_event(stream_chunk(cid, created, model, {"content": piece}))
+                elif isinstance(piece, dict) and "thought" in piece:
+                    yield sse_event(stream_chunk(cid, created, model, {"reasoning_content": piece["thought"]}))
                 elif isinstance(piece, ImageResponse) and piece.url:
                     markdown_img = f"\n\n![Generated Image]({piece.url})\n\n"
                     final_text += markdown_img

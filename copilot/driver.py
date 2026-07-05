@@ -466,6 +466,7 @@ class Copilot(AbstractProvider):
         is_started = False
         last_msg = None
         seen_text = ""
+        seen_thoughts = set()
         overall_deadline = time.time() + timeout
 
         while True:
@@ -500,13 +501,35 @@ class Copilot(AbstractProvider):
                         # First check if full text is provided in messages[0].text
                         messages = arg.get("messages", [])
                         if messages and isinstance(messages, list) and isinstance(messages[0], dict):
-                            server_text = messages[0].get("text")
+                            msg_obj = messages[0]
+                            server_text = msg_obj.get("text", "")
+                            
+                            if msg_obj.get("addToChainOfThought") or msg_obj.get("contentType") == "Thinking" or msg_obj.get("messageType") == "Progress":
+                                title = msg_obj.get("title", "")
+                                hidden = msg_obj.get("hiddenText", "")
+                                
+                                parts = []
+                                if title and title not in parts:
+                                    parts.append(title)
+                                if server_text and server_text not in parts:
+                                    parts.append(server_text)
+                                if hidden and hidden not in parts:
+                                    parts.append(hidden)
+                                
+                                combined = "\n".join(parts)
+                                if combined and combined not in seen_thoughts:
+                                    seen_thoughts.add(combined)
+                                    is_started = True
+                                    yield {"thought": combined + "\n\n"}
+                                continue
+
                             if server_text and server_text.startswith(seen_text) and len(server_text) > len(seen_text):
                                 new_text = server_text[len(seen_text):]
                                 seen_text = server_text
                                 is_started = True
                                 yield new_text
                                 continue
+
 
                         # Then check if a delta is provided via writeAtCursor
                         write_at_cursor = arg.get("writeAtCursor")
