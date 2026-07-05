@@ -2,7 +2,9 @@
 set -e
 
 # Clean up any stale X11 locks before starting (crucial for docker restart)
-rm -rf /tmp/.X* /tmp/.X11-unix/*
+mkdir -p /tmp/.X11-unix
+chmod 1777 /tmp/.X11-unix
+rm -f /tmp/.X*-lock /tmp/.X11-unix/X*
 
 # Start X virtual framebuffer
 Xvfb $DISPLAY -screen 0 ${RESOLUTION} -ac +extension RANDR &
