@@ -69,7 +69,7 @@ class StreamCleaner:
         self.buffer = re.sub(r'citeturn\d+search\d+', '', self.buffer)
         return self.buffer.replace('\u200b', '')
 
-def _stream(api_key: str, prompt: str, model: str, messages: list, conversation_id=None, plugins=None):
+def _stream(session, prompt: str, model: str, messages: list, conversation_id=None, plugins=None):
     """Yield OpenAI ``chat.completion.chunk`` SSE events for ``prompt``.
 
     ``conversation_id`` continues an existing Copilot thread; ``None`` starts a
@@ -78,46 +78,45 @@ def _stream(api_key: str, prompt: str, model: str, messages: list, conversation_
     cid = new_id()
     created = int(time.time())
     try:
-        with pool.acquire_session(api_key) as session:  # non-blocking fallback to available session
-            yield sse_event(stream_chunk(cid, created, model, {"role": "assistant"}))
-            stream = session.client.stream(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
-            final_text = ""
-            final_thought = ""
-            cleaner = StreamCleaner()
-            for piece in stream:
-                if isinstance(piece, str) and piece:
-                    cleaned_piece = cleaner.process(piece)
-                    final_text += cleaned_piece
-                    if cleaned_piece:
-                        yield sse_event(stream_chunk(cid, created, model, {"content": cleaned_piece}))
-                elif isinstance(piece, dict) and "thought" in piece:
-                    final_thought += piece["thought"]
-                    yield sse_event(stream_chunk(cid, created, model, {"reasoning_content": piece["thought"]}))
-                elif isinstance(piece, ImageResponse) and piece.url:
-                    markdown_img = f"\n\n![Generated Image]({piece.url})\n\n"
-                    final_text += markdown_img
-                    yield sse_event(stream_chunk(cid, created, model, {"content": markdown_img}))
-            
-            # Flush any remaining text in the cleaner
-            flushed = cleaner.flush()
-            if flushed:
-                final_text += flushed
-                yield sse_event(stream_chunk(cid, created, model, {"content": flushed}))
-            
-            # Save the new state so future requests can continue seamlessly
-            if stream.conversation_id:
-                from .schemas import ChatMessage
-                updated_messages = messages + [ChatMessage(role="assistant", content=final_text, reasoning_content=final_thought if final_thought else None)]
-                new_head_hash = router._hash_messages(updated_messages)
-                router.save_state(new_head_hash, stream.conversation_id)
+        yield sse_event(stream_chunk(cid, created, model, {"role": "assistant"}))
+        stream = session.client.stream(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
+        final_text = ""
+        final_thought = ""
+        cleaner = StreamCleaner()
+        for piece in stream:
+            if isinstance(piece, str) and piece:
+                cleaned_piece = cleaner.process(piece)
+                final_text += cleaned_piece
+                if cleaned_piece:
+                    yield sse_event(stream_chunk(cid, created, model, {"content": cleaned_piece}))
+            elif isinstance(piece, dict) and "thought" in piece:
+                final_thought += piece["thought"]
+                yield sse_event(stream_chunk(cid, created, model, {"reasoning_content": piece["thought"]}))
+            elif isinstance(piece, ImageResponse) and piece.url:
+                markdown_img = f"\n\n![Generated Image]({piece.url})\n\n"
+                final_text += markdown_img
+                yield sse_event(stream_chunk(cid, created, model, {"content": markdown_img}))
+        
+        # Flush any remaining text in the cleaner
+        flushed = cleaner.flush()
+        if flushed:
+            final_text += flushed
+            yield sse_event(stream_chunk(cid, created, model, {"content": flushed}))
+        
+        # Save the new state so future requests can continue seamlessly
+        if stream.conversation_id:
+            from .schemas import ChatMessage
+            updated_messages = messages + [ChatMessage(role="assistant", content=final_text, reasoning_content=final_thought if final_thought else None)]
+            new_head_hash = router._hash_messages(updated_messages)
+            router.save_state(new_head_hash, stream.conversation_id, session.session_name)
 
-            # Copilot's conversation id is known once the stream has run; emit it
-            yield sse_event(
-                stream_chunk(
-                    cid, created, model, {}, finish="stop",
-                    conversation_id=stream.conversation_id,
-                )
+        # Copilot's conversation id is known once the stream has run; emit it
+        yield sse_event(
+            stream_chunk(
+                cid, created, model, {}, finish="stop",
+                conversation_id=stream.conversation_id,
             )
+        )
     except RateLimitExceeded as exc:
         secs = max(1, round(exc.wait_seconds))
         err_json = {
@@ -156,7 +155,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
     api_key = creds.credentials if creds else "sk-default"
     
     try:
-        conversation_id, prompt, _ = router.route(
+        conversation_id, prompt, _, preferred_session = router.route(
             api_key=api_key, 
             messages=req.messages, 
             client_provided_cid=req.conversation_id
@@ -184,14 +183,30 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
     if not plugins:
         plugins = None
 
-    if req.stream:
-        return StreamingResponse(
-            _stream(api_key, prompt, model, req.messages, conversation_id, plugins=plugins), media_type="text/event-stream"
-        )
-
     try:
-        with pool.acquire_session(api_key) as session:
-            reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
+        if req.stream:
+            # Wrap the generator so we can check the acquired session
+            def stream_wrapper():
+                nonlocal conversation_id
+                with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                    if preferred_session and session.session_name != preferred_session:
+                        # We fell back to a different account; Copilot conversation IDs are tied to accounts,
+                        # so we must start a fresh conversation instead of failing.
+                        conversation_id = None
+                        
+                    yield from _stream(session, prompt, model, req.messages, conversation_id, plugins)
+    
+            return StreamingResponse(
+                stream_wrapper(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            )
+        else:
+            with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                if preferred_session and session.session_name != preferred_session:
+                    conversation_id = None
+                
+                reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
             final_text = reply.text
             if reply.images:
                 for img in reply.images:
@@ -202,7 +217,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                 from .schemas import ChatMessage
                 updated_messages = req.messages + [ChatMessage(role="assistant", content=final_text)]
                 new_head_hash = router._hash_messages(updated_messages)
-                router.save_state(new_head_hash, reply.conversation_id)
+                router.save_state(new_head_hash, reply.conversation_id, session.session_name)
             return completion_response(final_text, model, reply.conversation_id)
     except RateLimitExceeded as exc:
         secs = max(1, round(exc.wait_seconds))

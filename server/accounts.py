@@ -223,7 +223,7 @@ class AccountPool:
             return api_key in self.api_keys
 
     @contextmanager
-    def acquire_session(self, api_key: str):
+    def acquire_session(self, api_key: str, preferred_session: str = None):
         """
         Yields an available SessionInstance for the given API Key.
         Attempts non-blocking acquire across all bound sessions to maximize throughput.
@@ -239,8 +239,12 @@ class AccountPool:
         acquired_session = None
         min_wait = float('inf')
         
-        # Prioritize healthy sessions
-        all_sessions.sort(key=lambda s: not s.is_healthy())
+        # Prioritize preferred_session, then healthy sessions
+        def sort_key(s):
+            is_pref = (s.session_name == preferred_session)
+            return (not is_pref, not s.is_healthy())
+            
+        all_sessions.sort(key=sort_key)
         
         def try_acquire(sess) -> bool:
             nonlocal min_wait
@@ -284,7 +288,7 @@ class AccountPool:
                 self._session_released_cv.wait(timeout=wait_time)
                 
             min_wait = float('inf')
-            all_sessions.sort(key=lambda s: not s.is_healthy())
+            all_sessions.sort(key=sort_key)
             for sess in all_sessions:
                 if try_acquire(sess):
                     acquired_session = sess
