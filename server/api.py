@@ -258,51 +258,53 @@ def login_session(session_name: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(run_browser)
     return {"status": "started", "session": session_name}
 
-@app.websocket("/vnc-ws")
-async def vnc_ws(websocket: WebSocket):
-    # Accept the connection with the binary subprotocol expected by noVNC
-    await websocket.accept(subprotocol="binary")
-    
-    try:
-        reader, writer = await asyncio.open_connection('127.0.0.1', 5900)
-    except Exception as e:
-        print(f"Failed to connect to local VNC server (5900): {e}")
-        await websocket.close()
-        return
-
-    async def ws_to_tcp():
-        try:
-            while True:
-                data = await websocket.receive_bytes()
-                writer.write(data)
-                await writer.drain()
-        except Exception:
-            pass
-
-    async def tcp_to_ws():
-        try:
-            while True:
-                data = await reader.read(4096)
-                if not data:
-                    break
-                await websocket.send_bytes(data)
-        except Exception:
-            pass
-
-    t1 = asyncio.create_task(ws_to_tcp())
-    t2 = asyncio.create_task(tcp_to_ws())
-    
-    done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
-    for p in pending:
-        p.cancel()
-    
-    writer.close()
-    await writer.wait_closed()
-    await websocket.close()
 
 import os
 # Mount noVNC static files if available in the Docker container
 if os.path.exists("/usr/share/novnc"):
+    # We define the websocket route BEFORE the static files mount so it takes precedence
+    @app.websocket("/novnc/vnc-ws")
+    async def vnc_ws(websocket: WebSocket):
+        # Accept the connection with the binary subprotocol expected by noVNC
+        await websocket.accept(subprotocol="binary")
+        
+        try:
+            reader, writer = await asyncio.open_connection('127.0.0.1', 5900)
+        except Exception as e:
+            print(f"Failed to connect to local VNC server (5900): {e}")
+            await websocket.close()
+            return
+            
+        async def forward(ws_receive, tcp_send):
+            try:
+                while True:
+                    data = await ws_receive()
+                    tcp_send(data)
+                    await asyncio.sleep(0.001)
+            except Exception:
+                pass
+
+        async def reverse(tcp_receive, ws_send):
+            try:
+                while True:
+                    data = await tcp_receive(4096)
+                    if not data:
+                        break
+                    await ws_send(data)
+                    await asyncio.sleep(0.001)
+            except Exception:
+                pass
+                
+        try:
+            await asyncio.gather(
+                forward(websocket.receive_bytes, writer.write),
+                reverse(reader.read, websocket.send_bytes)
+            )
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            await websocket.close()
+
     app.mount("/novnc", StaticFiles(directory="/usr/share/novnc"), name="novnc")
 
 @app.get("/", dependencies=[Depends(verify_admin)])
