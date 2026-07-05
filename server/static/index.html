@@ -26,9 +26,22 @@
         .vnc-container { width: 100%; height: 600px; border: 1px solid #ddd; border-radius: 4px; background: #000; position: relative; }
         iframe { width: 100%; height: 100%; border: none; }
         .vnc-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.7); color: white; flex-direction: column; }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); justify-content: center; align-items: center; z-index: 1000; }
+        .modal { background: white; padding: 20px; border-radius: 8px; width: 300px; text-align: center; }
+        .modal input { width: 90%; padding: 8px; margin: 10px 0; border: 1px solid #ddd; border-radius: 4px; }
     </style>
 </head>
 <body>
+    <div class="modal-overlay" id="auth-modal">
+        <div class="modal">
+            <h3>需要访问密码</h3>
+            <p>请提供管理页面访问密码</p>
+            <input type="password" id="auth-password" placeholder="密码">
+            <br>
+            <button class="primary-btn" onclick="submitAuth()">确认</button>
+        </div>
+    </div>
+
     <h1>Copilot API 控制台</h1>
     <div class="container">
         <!-- Accounts Panel -->
@@ -58,6 +71,41 @@
     </div>
 
     <script>
+        // Override global fetch to always inject X-Admin-Auth header and handle 401s
+        const originalFetch = window.fetch;
+        window.fetch = async function() {
+            let [resource, config] = arguments;
+            if (typeof resource === 'string' && resource.startsWith('/api/')) {
+                config = config || {};
+                config.headers = config.headers || {};
+                config.headers['X-Admin-Auth'] = localStorage.getItem('admin_pwd') || '';
+                
+                let response = await originalFetch(resource, config);
+                if (response.status === 401) {
+                    return new Promise((resolve, reject) => {
+                        window._pendingFetch = { resource, config, resolve, reject };
+                        document.getElementById('auth-modal').style.display = 'flex';
+                    });
+                }
+                return response;
+            }
+            return originalFetch.apply(this, arguments);
+        };
+
+        function submitAuth() {
+            const pwd = document.getElementById('auth-password').value;
+            localStorage.setItem('admin_pwd', pwd);
+            document.getElementById('auth-modal').style.display = 'none';
+            if (window._pendingFetch) {
+                const { resource, config, resolve, reject } = window._pendingFetch;
+                window._pendingFetch = null;
+                // Re-trigger the failed fetch
+                window.fetch(resource, config).then(resolve).catch(reject);
+            } else {
+                loadAccounts();
+            }
+        }
+
         async function loadAccounts() {
             const res = await fetch('/api/accounts');
             const data = await res.json();

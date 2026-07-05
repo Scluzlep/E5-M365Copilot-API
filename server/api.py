@@ -58,13 +58,8 @@ class StreamCleaner:
                 self.ref_counter += 1
             idx = self.ref_map[ref]
             
-            cite_info = self.citations.get(ref)
-            if cite_info and cite_info.get("url"):
-                # Markdown 链接格式 [1](https://...)
-                replacements.append(f"[[{idx}]]({cite_info['url']})")
-            else:
-                # 纯数字兜底 [1]
-                replacements.append(f"[{idx}]")
+            # Inline we just put [1]
+            replacements.append(f"[{idx}]")
                 
         return "".join(replacements)
 
@@ -108,7 +103,24 @@ class StreamCleaner:
         self.buffer = re.sub(r'\ue200cite((?:\ue202turn\d+search\d+)+)\ue201', self._replace_citations, self.buffer)
         self.buffer = re.sub(r'\u200b?cite((?:turn\d+search\d+)+)\u200b?', self._replace_citations, self.buffer)
         self.buffer = re.sub(r'\ue200.*', '', self.buffer)
-        return self.buffer.replace('\u200b', '')
+        
+        result = self.buffer.replace('\u200b', '')
+        
+        # Append references list if any
+        if self.ref_map and self.citations:
+            # Only append if we actually have valid URLs to show
+            valid_refs = []
+            for ref_id, idx in sorted(self.ref_map.items(), key=lambda x: x[1]):
+                cite_info = self.citations.get(ref_id)
+                if cite_info and cite_info.get("url"):
+                    name = cite_info.get('name') or cite_info['url']
+                    valid_refs.append(f"[{idx}] [{name}]({cite_info['url']})")
+            
+            if valid_refs:
+                result += "\n\n### References\n" + "\n".join(valid_refs) + "\n"
+                
+        self.buffer = ""
+        return result
 
 def _stream(session, prompt: str, model: str, messages: list, conversation_id=None, plugins=None):
     """Yield OpenAI ``chat.completion.chunk`` SSE events for ``prompt``.
@@ -288,35 +300,29 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import asyncio
 from fastapi.responses import HTMLResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import secrets
 import os
 
-security_basic = HTTPBasic(auto_error=False)
+from fastapi import Request
 
-def verify_admin(credentials: HTTPBasicCredentials = Depends(security_basic)):
-    if os.environ.get("WEB_AUTH_ENABLED", "true").lower() in ("false", "0", "no"):
-        return True
-        
-    if not credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-
-    expected_user = os.environ.get("WEB_AUTH_USERNAME", "admin")
-    expected_pass = os.environ.get("WEB_AUTH_PASSWORD", "copilot")
+def verify_admin(request: Request):
+    expected_pass = os.environ.get("WEB_AUTH_PASSWORD")
     
-    correct_username = secrets.compare_digest(credentials.username.encode("utf8"), expected_user.encode("utf8"))
-    correct_password = secrets.compare_digest(credentials.password.encode("utf8"), expected_pass.encode("utf8"))
-    if not (correct_username and correct_password):
+    if not expected_pass:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Basic"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server misconfigured: WEB_AUTH_PASSWORD is not set."
         )
-    return credentials.username
+    
+    admin_auth = request.headers.get("X-Admin-Auth")
+    if admin_auth is not None and secrets.compare_digest(admin_auth.encode("utf8"), expected_pass.encode("utf8")):
+        return "admin"
+        
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated or incorrect password"
+    )
+
 
 class AddKeyRequest(BaseModel):
     api_key: str
@@ -438,7 +444,7 @@ if os.path.exists("/usr/share/novnc"):
 
     app.mount("/novnc", StaticFiles(directory="/usr/share/novnc"), name="novnc")
 
-@app.get("/", dependencies=[Depends(verify_admin)])
+@app.get("/")
 def root():
     index_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
     if os.path.exists(index_path):

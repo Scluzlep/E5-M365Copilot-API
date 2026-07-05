@@ -120,23 +120,48 @@ class CopilotClient:
 
     def _stream_direct(self, prompt, conversation_id, model, kwargs):
         """Drive the turn directly against E5 / Enterprise Copilot."""
-        auth = self._fresh_auth()
-        kw = dict(
-            stream=True,
-            proxy=self._proxy,
-            cookies=auth["cookies"] if auth else None,
-            access_token=auth["access_token"] if auth else None,
-            identity_type=auth.get("identity_type") if auth else None,
-            model=model,
-            **kwargs,
-        )
-        if conversation_id is None:
-            kw["return_conversation"] = True  # have the driver hand back its id
-        else:
-            kw["conversation_id"] = conversation_id
+        from .driver import ClearanceRequired
+        retries = 1
+        while retries >= 0:
+            auth = self._fresh_auth()
+            kw = dict(
+                stream=True,
+                proxy=self._proxy,
+                cookies=auth["cookies"] if auth else None,
+                access_token=auth["access_token"] if auth else None,
+                identity_type=auth.get("identity_type") if auth else None,
+                model=model,
+                **kwargs,
+            )
+            if conversation_id is None:
+                kw["return_conversation"] = True  # have the driver hand back its id
+            else:
+                kw["conversation_id"] = conversation_id
 
-        for item in self._driver.create_completion(prompt, **kw):
-            yield item
+            try:
+                gen = self._driver.create_completion(prompt, **kw)
+                
+                # Fetch the first item to flush any immediate auth/setup errors
+                try:
+                    first_item = next(gen)
+                except StopIteration:
+                    return
+                
+                yield first_item
+                for item in gen:
+                    yield item
+                    
+                return # success
+                
+            except (RuntimeError, ClearanceRequired) as e:
+                if "Failed to decode" in str(e) or isinstance(e, ClearanceRequired):
+                    self.invalidate_auth()
+                    if retries > 0:
+                        retries -= 1
+                        import sys
+                        print(f"[copilot] Auth error encountered, retrying... ({e})", file=sys.stderr)
+                        continue
+                raise
 
     def chat(
         self,
@@ -171,3 +196,14 @@ class CopilotClient:
                 proxy=self._proxy
             )
         return self._auth
+
+    def invalidate_auth(self) -> None:
+        """Force the next _fresh_auth to fetch a new token via the browser."""
+        import os
+        self._auth = None
+        token_path = f"{self._session_dir}/token.json"
+        if os.path.exists(token_path):
+            try:
+                os.remove(token_path)
+            except OSError:
+                pass
