@@ -32,6 +32,43 @@ _AUTH_HELP = (
 
 from .accounts import pool, RateLimitExceeded
 
+import re
+
+class StreamCleaner:
+    def __init__(self):
+        self.buffer = ""
+
+    def process(self, chunk: str) -> str:
+        self.buffer += chunk
+        self.buffer = re.sub(r'【\d+-[a-zA-Z0-9]+】', '', self.buffer)
+        self.buffer = re.sub(r'\u200bciteturn\d+search\d+\u200b', '', self.buffer)
+        self.buffer = re.sub(r'citeturn\d+search\d+', '', self.buffer)
+        self.buffer = self.buffer.replace('\u200b', '')
+        
+        idx_bracket = self.buffer.rfind('【')
+        idx_cite = self.buffer.rfind('citeturn')
+        
+        hold_idx = -1
+        if idx_bracket != -1 and '】' not in self.buffer[idx_bracket:]:
+            hold_idx = idx_bracket
+        if idx_cite != -1 and (len(self.buffer) - idx_cite < 20):
+            if hold_idx == -1 or idx_cite < hold_idx:
+                hold_idx = idx_cite
+                
+        if hold_idx != -1:
+            output = self.buffer[:hold_idx]
+            self.buffer = self.buffer[hold_idx:]
+            return output
+        else:
+            output = self.buffer
+            self.buffer = ""
+            return output
+
+    def flush(self) -> str:
+        self.buffer = re.sub(r'【\d+-[a-zA-Z0-9]+】', '', self.buffer)
+        self.buffer = re.sub(r'citeturn\d+search\d+', '', self.buffer)
+        return self.buffer.replace('\u200b', '')
+
 def _stream(api_key: str, prompt: str, model: str, messages: list, conversation_id=None, plugins=None):
     """Yield OpenAI ``chat.completion.chunk`` SSE events for ``prompt``.
 
@@ -45,21 +82,32 @@ def _stream(api_key: str, prompt: str, model: str, messages: list, conversation_
             yield sse_event(stream_chunk(cid, created, model, {"role": "assistant"}))
             stream = session.client.stream(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
             final_text = ""
+            final_thought = ""
+            cleaner = StreamCleaner()
             for piece in stream:
                 if isinstance(piece, str) and piece:
-                    final_text += piece
-                    yield sse_event(stream_chunk(cid, created, model, {"content": piece}))
+                    cleaned_piece = cleaner.process(piece)
+                    final_text += cleaned_piece
+                    if cleaned_piece:
+                        yield sse_event(stream_chunk(cid, created, model, {"content": cleaned_piece}))
                 elif isinstance(piece, dict) and "thought" in piece:
+                    final_thought += piece["thought"]
                     yield sse_event(stream_chunk(cid, created, model, {"reasoning_content": piece["thought"]}))
                 elif isinstance(piece, ImageResponse) and piece.url:
                     markdown_img = f"\n\n![Generated Image]({piece.url})\n\n"
                     final_text += markdown_img
                     yield sse_event(stream_chunk(cid, created, model, {"content": markdown_img}))
             
+            # Flush any remaining text in the cleaner
+            flushed = cleaner.flush()
+            if flushed:
+                final_text += flushed
+                yield sse_event(stream_chunk(cid, created, model, {"content": flushed}))
+            
             # Save the new state so future requests can continue seamlessly
             if stream.conversation_id:
                 from .schemas import ChatMessage
-                updated_messages = messages + [ChatMessage(role="assistant", content=final_text)]
+                updated_messages = messages + [ChatMessage(role="assistant", content=final_text, reasoning_content=final_thought if final_thought else None)]
                 new_head_hash = router._hash_messages(updated_messages)
                 router.save_state(new_head_hash, stream.conversation_id)
 

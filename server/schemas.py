@@ -12,6 +12,7 @@ class ChatMessage(BaseModel):
     # content is a plain string, or OpenAI "content parts" (list of dicts), or
     # null for some tool/assistant messages.
     content: Optional[Union[str, List[Any]]] = None
+    reasoning_content: Optional[str] = None
 
 
 class ChatCompletionRequest(BaseModel):

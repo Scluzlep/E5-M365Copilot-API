@@ -21,9 +21,12 @@ class ConversationRouter:
 
     def _hash_messages(self, messages) -> str:
         """Create a deterministic hash from a list of ChatMessage."""
+        import re
         s = ""
         for m in messages:
-            s += f"|{m.role}|{content_text(m.content)}"
+            content = content_text(m.content)
+            content = re.sub(r'<think>.*?</think>\n*', '', content, flags=re.DOTALL)
+            s += f"|{m.role}|{content}"
         return hashlib.md5(s.encode("utf-8")).hexdigest()
 
     def route(self, api_key: str, messages, client_provided_cid: Optional[str]) -> Tuple[Optional[str], str, str]:
