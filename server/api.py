@@ -265,8 +265,19 @@ if os.path.exists("/usr/share/novnc"):
     # We define the websocket route BEFORE the static files mount so it takes precedence
     @app.websocket("/novnc/vnc-ws")
     async def vnc_ws(websocket: WebSocket):
-        # Accept the connection with the binary subprotocol expected by noVNC
-        await websocket.accept(subprotocol="binary")
+        # Dynamically accept the subprotocol requested by the client to prevent browser 1006 aborts
+        client_protos = websocket.headers.get("sec-websocket-protocol", "")
+        protos = [p.strip() for p in client_protos.split(",") if p.strip()]
+        
+        subprotocol = None
+        if "binary" in protos:
+            subprotocol = "binary"
+        elif "base64" in protos:
+            subprotocol = "base64"
+        elif len(protos) > 0:
+            subprotocol = protos[0]
+            
+        await websocket.accept(subprotocol=subprotocol)
         
         try:
             reader, writer = await asyncio.open_connection('127.0.0.1', 5900)
@@ -275,15 +286,21 @@ if os.path.exists("/usr/share/novnc"):
             await websocket.close()
             return
             
+        import base64
         async def ws_to_tcp():
             try:
                 while True:
-                    data = await websocket.receive_bytes()
-                    writer.write(data)
-                    await writer.drain()
+                    message = await websocket.receive()
+                    if "bytes" in message and message["bytes"]:
+                        writer.write(message["bytes"])
+                        await writer.drain()
+                    elif "text" in message and message["text"]:
+                        writer.write(base64.b64decode(message["text"]))
+                        await writer.drain()
+                    elif message["type"] == "websocket.disconnect":
+                        break
             except Exception as e:
                 print(f"ws_to_tcp exception: {type(e).__name__} - {e}")
-                pass
 
         async def tcp_to_ws():
             try:
@@ -291,10 +308,12 @@ if os.path.exists("/usr/share/novnc"):
                     data = await reader.read(4096)
                     if not data:
                         break
-                    await websocket.send_bytes(data)
+                    if subprotocol == "base64":
+                        await websocket.send_text(base64.b64encode(data).decode('ascii'))
+                    else:
+                        await websocket.send_bytes(data)
             except Exception as e:
                 print(f"tcp_to_ws exception: {type(e).__name__} - {e}")
-                pass
                 
         t1 = asyncio.create_task(ws_to_tcp())
         t2 = asyncio.create_task(tcp_to_ws())
