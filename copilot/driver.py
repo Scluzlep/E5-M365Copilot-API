@@ -523,17 +523,37 @@ class Copilot(AbstractProvider):
                                     yield {"thought": combined + "\n\n"}
                                 continue
 
-                            if server_text and server_text.startswith(seen_text) and len(server_text) > len(seen_text):
-                                new_text = server_text[len(seen_text):]
-                                seen_text = server_text
-                                is_started = True
-                                yield new_text
-                                continue
+                            msg_obj = arg.get("messages", [{}])[0]
+                            server_text = msg_obj.get("text", "")
+                            if not server_text and "hiddenText" in msg_obj:
+                                server_text = msg_obj["hiddenText"]
 
+                            if server_text:
+                                # Normalize \r\n to \n to prevent startswith() failures
+                                server_text = server_text.replace("\r\n", "\n")
+                                
+                                if len(server_text) > len(seen_text):
+                                    if server_text.startswith(seen_text):
+                                        new_text = server_text[len(seen_text):]
+                                    else:
+                                        # Fallback: find longest common prefix in case of minor mismatches
+                                        common_len = 0
+                                        for i in range(min(len(seen_text), len(server_text))):
+                                            if seen_text[i] == server_text[i]:
+                                                common_len = i + 1
+                                            else:
+                                                break
+                                        new_text = server_text[common_len:]
+                                    
+                                    seen_text = server_text
+                                    is_started = True
+                                    yield new_text
+                                    continue
 
                         # Then check if a delta is provided via writeAtCursor
                         write_at_cursor = arg.get("writeAtCursor")
                         if write_at_cursor:
+                            write_at_cursor = write_at_cursor.replace("\r\n", "\n")
                             seen_text += write_at_cursor
                             is_started = True
                             yield write_at_cursor
