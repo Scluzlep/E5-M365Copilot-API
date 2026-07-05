@@ -12,6 +12,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Ensure Playwright installs to a deterministic path so our browser.py can find it or not override it.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 # Install Python deps first so the layer caches across code changes.
 COPY requirements.txt .
 # Install pip dependencies, then use playwright to install ONLY chromium and its specific OS dependencies
