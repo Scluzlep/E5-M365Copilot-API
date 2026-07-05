@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Copilot API 控制台</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f4f6f8; margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 1200px; margin: 0 auto; display: flex; gap: 20px; }
+        .panel { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); flex: 1; }
+        h1, h2 { margin-top: 0; }
+        .api-key-block { border: 1px solid #ddd; margin-bottom: 10px; padding: 10px; border-radius: 4px; }
+        .api-key-header { display: flex; justify-content: space-between; align-items: center; }
+        .api-key-text { cursor: pointer; color: #2563eb; font-weight: bold; }
+        .api-key-text:hover { text-decoration: underline; }
+        .delete-btn { background: #ef4444; padding: 2px 8px; font-size: 12px; border-radius: 4px; color: white; cursor: pointer; border: none; }
+        .delete-btn:hover { background: #dc2626; }
+        .sessions-list { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+        .session-tag { background: #e0e7ff; color: #3730a3; padding: 4px 10px; border-radius: 99px; font-size: 14px; display: flex; align-items: center; gap: 6px; }
+        .session-tag span { cursor: pointer; }
+        .session-tag span:hover { text-decoration: underline; }
+        .session-del { cursor: pointer; color: #ef4444; font-weight: bold; }
+        .session-del:hover { color: #b91c1c; }
+        input, button { padding: 8px 12px; margin: 5px 0; border: 1px solid #ccc; border-radius: 4px; }
+        .primary-btn { background: #2563eb; color: white; border: none; cursor: pointer; }
+        .primary-btn:hover { background: #1d4ed8; }
+        .vnc-container { width: 100%; height: 600px; border: 1px solid #ddd; border-radius: 4px; background: #000; position: relative; }
+        iframe { width: 100%; height: 100%; border: none; }
+        .vnc-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.7); color: white; flex-direction: column; }
+    </style>
+</head>
+<body>
+    <h1>Copilot API 控制台</h1>
+    <div class="container">
+        <!-- Accounts Panel -->
+        <div class="panel" style="flex: 1;">
+            <h2>账号池 (Account Pool)</h2>
+            <div id="accounts-container">加载中...</div>
+            
+            <h3 style="margin-top: 30px;">添加新映射 (Add New Mapping)</h3>
+            <input type="text" id="new-apikey" placeholder="API Key (例如 sk-team)">
+            <input type="text" id="new-sessions" placeholder="Sessions (逗号分隔)">
+            <br>
+            <button class="primary-btn" onclick="addAccount()">添加/追加映射</button>
+        </div>
+
+        <!-- VNC Panel -->
+        <div class="panel" style="flex: 2;">
+            <h2>VNC 浏览器登录</h2>
+            <p>点击左侧的 session 启动浏览器并通过 VNC 登录。</p>
+            <div class="vnc-container" id="vnc-container">
+                <div class="vnc-overlay" id="vnc-overlay">
+                    <p>未选择 session。</p>
+                    <p>请选择一个 session 以启动浏览器。</p>
+                </div>
+                <iframe id="vnc-iframe" src=""></iframe>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function loadAccounts() {
+            const res = await fetch('/api/accounts');
+            const data = await res.json();
+            const container = document.getElementById('accounts-container');
+            container.innerHTML = '';
+            
+            for (const [key, sessions] of Object.entries(data.api_keys)) {
+                const block = document.createElement('div');
+                block.className = 'api-key-block';
+                
+                const header = document.createElement('div');
+                header.className = 'api-key-header';
+                header.innerHTML = `
+                    <span class="api-key-text" onclick="copyKey('${key}')" title="点击复制">${key}</span>
+                    <button class="delete-btn" onclick="deleteKey('${key}')">删除 Key</button>
+                `;
+                block.appendChild(header);
+                
+                const sList = document.createElement('div');
+                sList.className = 'sessions-list';
+                
+                sessions.forEach(s => {
+                    const tag = document.createElement('div');
+                    tag.className = 'session-tag';
+                    
+                    const tagText = document.createElement('span');
+                    tagText.innerText = s;
+                    tagText.title = "点击启动浏览器";
+                    tagText.onclick = () => launchVnc(s);
+                    
+                    const delBtn = document.createElement('div');
+                    delBtn.className = 'session-del';
+                    delBtn.innerText = '×';
+                    delBtn.title = "移除该 session";
+                    delBtn.onclick = () => deleteSession(key, s);
+                    
+                    tag.appendChild(tagText);
+                    tag.appendChild(delBtn);
+                    sList.appendChild(tag);
+                });
+                
+                block.appendChild(sList);
+                container.appendChild(block);
+            }
+        }
+
+        function copyKey(key) {
+            navigator.clipboard.writeText(key).then(() => {
+                alert('已复制 Key: ' + key);
+            });
+        }
+
+        async function deleteKey(key) {
+            if (!confirm(`确定要删除 API Key "${key}" 吗？`)) return;
+            await fetch(`/api/accounts/${encodeURIComponent(key)}`, { method: 'DELETE' });
+            loadAccounts();
+        }
+
+        async function deleteSession(key, sessionName) {
+            if (!confirm(`确定要从 "${key}" 中移除 session "${sessionName}" 吗？`)) return;
+            await fetch(`/api/accounts/${encodeURIComponent(key)}/${encodeURIComponent(sessionName)}`, { method: 'DELETE' });
+            loadAccounts();
+        }
+
+        async function addAccount() {
+            const key = document.getElementById('new-apikey').value.trim();
+            const sessions = document.getElementById('new-sessions').value.split(',').map(s => s.trim()).filter(s => s);
+            if (!key || !sessions.length) return alert('请提供 API Key 和至少一个 session');
+            
+            await fetch('/api/accounts', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({api_key: key, sessions})
+            });
+            
+            document.getElementById('new-apikey').value = '';
+            document.getElementById('new-sessions').value = '';
+            loadAccounts();
+        }
+
+        async function launchVnc(sessionName) {
+            document.getElementById('vnc-overlay').innerHTML = `<p>正在为 ${sessionName} 启动浏览器...</p>`;
+            document.getElementById('vnc-overlay').style.display = 'flex';
+            
+            // Trigger browser launch
+            await fetch(`/api/login?session_name=${encodeURIComponent(sessionName)}`, { method: 'POST' });
+            
+            // Fetch configuration for VNC URL
+            const cfgRes = await fetch('/api/config');
+            const cfg = await cfgRes.json();
+            
+            let vncUrl = cfg.vnc_url;
+            if (!vncUrl) {
+                // Default to the embedded FastAPI noVNC proxy
+                vncUrl = `/novnc/vnc.html?autoconnect=true&path=vnc-ws`;
+            }
+            
+            // Load noVNC iframe
+            setTimeout(() => {
+                document.getElementById('vnc-iframe').src = vncUrl;
+                document.getElementById('vnc-overlay').style.display = 'none';
+            }, 3000);
+        }
+
+        loadAccounts();
+    </script>
+</body>
+</html>

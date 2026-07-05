@@ -1,0 +1,12 @@
+services:
+  copilot-api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Map the sessions directory to the host for persistence
+      - ./sessions:/app/sessions
+      - ./accounts.json:/app/accounts.json
+    restart: unless-stopped
