@@ -29,6 +29,38 @@ class SessionInstance:
         self.lock = threading.Lock()
         self.rate_limiter = TokenBucket(RATE_LIMIT_RPM, RATE_LIMIT_BURST)
 
+    def is_healthy(self) -> bool:
+        """Check if the session token is present and structurally valid/unexpired."""
+        token_file = os.path.join(self.session_dir, "token.json")
+        if not os.path.exists(token_file):
+            return False
+        try:
+            with open(token_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                token = data.get("access_token", "")
+                if not token:
+                    return False
+                
+                parts = token.split(".")
+                if len(parts) >= 2:
+                    import base64
+                    padded = parts[1] + '=' * (-len(parts[1]) % 4)
+                    payload = json.loads(base64.urlsafe_b64decode(padded).decode('utf-8'))
+                    
+                    import time
+                    exp = payload.get("exp")
+                    # Optionally check expiration if present (allow some buffer)
+                    if exp and time.time() > (exp - 60):
+                        return False
+                    
+                    if not payload.get("oid") or not payload.get("tid"):
+                        return False
+                        
+                    return True
+        except Exception:
+            return False
+        return False
+
     def get_info(self) -> dict:
         info = {"tid": "N/A", "oid": "N/A", "email": "N/A", "status": "未登录"}
         token_file = os.path.join(self.session_dir, "token.json")
@@ -200,9 +232,9 @@ class AccountPool:
         if not session_names:
             raise ValueError(f"Invalid API Key: {api_key}")
             
-        bound_sessions = [self.sessions[s] for s in session_names if s in self.sessions]
+        bound_sessions = [self.sessions[s] for s in session_names if s in self.sessions and self.sessions[s].is_healthy()]
         if not bound_sessions:
-            raise ValueError(f"API Key {api_key} has no valid bound sessions.")
+            raise ValueError(f"API Key {api_key} has no valid bound sessions (tokens expired or malformed). Please login using python -m copilot login.")
 
         acquired_session = None
         min_wait = float('inf')
