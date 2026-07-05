@@ -39,19 +39,33 @@ class SessionInstance:
         try:
             with open(token_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                for c in data.get("cookies", []):
-                    name = c.get("name", "")
-                    val = c.get("value", "")
-                    if name == "TIDC":
-                        info["tid"] = val
-                    elif name == "OIDC":
-                        info["oid"] = val
-                    elif "@" in val and not " " in val and len(val) < 60:
-                        # Simple heuristic for Microsoft account email in cookies
-                        import urllib.parse
-                        decoded = urllib.parse.unquote(val)
-                        if "@" in decoded and "." in decoded and "{" not in decoded:
-                            info["email"] = decoded
+                
+                # The most reliable way to get TID, OID, and Email is to decode the JWT access_token
+                token = data.get("access_token", "")
+                if token:
+                    parts = token.split(".")
+                    if len(parts) >= 2:
+                        import base64
+                        padded = parts[1] + '=' * (-len(parts[1]) % 4)
+                        payload = json.loads(base64.urlsafe_b64decode(padded).decode('utf-8'))
+                        info["tid"] = payload.get("tid", "N/A")
+                        info["oid"] = payload.get("oid", "N/A")
+                        info["email"] = payload.get("unique_name", payload.get("upn", payload.get("email", "N/A")))
+
+                # Fallback to cookies if JWT is missing or invalid
+                # Note: 'cookies' is a dict of name->value, not a list of dicts.
+                cookies = data.get("cookies", {})
+                if isinstance(cookies, dict):
+                    for name, val in cookies.items():
+                        if name == "TIDC" and info["tid"] == "N/A":
+                            info["tid"] = val
+                        elif name == "OIDC" and info["oid"] == "N/A":
+                            info["oid"] = val
+                        elif "@" in val and not " " in val and len(val) < 60 and info["email"] == "N/A":
+                            import urllib.parse
+                            decoded = urllib.parse.unquote(val)
+                            if "@" in decoded and "." in decoded and "{" not in decoded:
+                                info["email"] = decoded
         except Exception:
             pass
         return info
