@@ -41,19 +41,28 @@ class StreamCleaner:
     def process(self, chunk: str) -> str:
         self.buffer += chunk
         self.buffer = re.sub(r'【\d+-[a-zA-Z0-9]+】', '', self.buffer)
-        self.buffer = re.sub(r'\u200bciteturn\d+search\d+\u200b', '', self.buffer)
-        self.buffer = re.sub(r'citeturn\d+search\d+', '', self.buffer)
+        
+        # New Copilot cite format: citeturn1search20 (\ue200cite\ue202turn...\ue201)
+        self.buffer = re.sub(r'\ue200cite(?:\ue202turn\d+search\d+)+\ue201', '', self.buffer)
+        # Old cite format fallback / Strip unicode-stripped remnants
+        self.buffer = re.sub(r'\u200b?cite(?:turn\d+search\d+)+\u200b?', '', self.buffer)
         self.buffer = self.buffer.replace('\u200b', '')
         
         idx_bracket = self.buffer.rfind('【')
         idx_cite = self.buffer.rfind('citeturn')
+        idx_e200 = self.buffer.rfind('\ue200')
         
         hold_idx = -1
         if idx_bracket != -1 and '】' not in self.buffer[idx_bracket:]:
             hold_idx = idx_bracket
+            
         if idx_cite != -1 and (len(self.buffer) - idx_cite < 20):
             if hold_idx == -1 or idx_cite < hold_idx:
                 hold_idx = idx_cite
+                
+        if idx_e200 != -1 and '\ue201' not in self.buffer[idx_e200:]:
+            if hold_idx == -1 or idx_e200 < hold_idx:
+                hold_idx = idx_e200
                 
         if hold_idx != -1:
             output = self.buffer[:hold_idx]
@@ -66,7 +75,9 @@ class StreamCleaner:
 
     def flush(self) -> str:
         self.buffer = re.sub(r'【\d+-[a-zA-Z0-9]+】', '', self.buffer)
-        self.buffer = re.sub(r'citeturn\d+search\d+', '', self.buffer)
+        self.buffer = re.sub(r'\ue200cite(?:\ue202turn\d+search\d+)+\ue201', '', self.buffer)
+        self.buffer = re.sub(r'\u200b?cite(?:turn\d+search\d+)+\u200b?', '', self.buffer)
+        self.buffer = re.sub(r'\ue200.*', '', self.buffer)
         return self.buffer.replace('\u200b', '')
 
 def _stream(session, prompt: str, model: str, messages: list, conversation_id=None, plugins=None):
