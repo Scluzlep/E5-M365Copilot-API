@@ -508,7 +508,7 @@ class BrowserCopilot:
         return False
 
     def acquire_chat_token(
-        self, timeout: int = 180, warmup: bool = True, signin_grace: int = 8
+        self, timeout: int = 180, warmup: bool = True, signin_grace: int = 30
     ) -> Optional[str]:
         """Return a usable chat token, minting it via a warm-up turn if needed.
 
