@@ -5,6 +5,7 @@ Speaks Microsoft 365 E5 Copilot chat protocol directly over a
 :class:`copilot.client.CopilotClient`. See :mod:`copilot.browser` for interactive login.
 """
 
+import base64
 import json
 import time
 import uuid
@@ -201,11 +202,14 @@ class Copilot(AbstractProvider):
 
                         try:
                             file_id, file_url = _try_upload(scenario)
-                        except Exception:
+                        except Exception as e:
+                            import sys
+                            print(f"[Driver] Upload failed for scenario '{scenario}' ({fname}): {e}", file=sys.stderr)
                             if scenario != "UploadImage":
                                 try:
                                     file_id, file_url = _try_upload("UploadImage")
-                                except Exception:
+                                except Exception as e2:
+                                    print(f"[Driver] Fallback upload failed for scenario 'UploadImage' ({fname}): {e2}", file=sys.stderr)
                                     file_id, file_url = None, None
                             else:
                                 file_id, file_url = None, None
