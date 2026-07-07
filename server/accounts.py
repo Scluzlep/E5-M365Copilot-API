@@ -46,6 +46,8 @@ class SessionInstance:
                 data = json.load(f)
                 token = data.get("access_token", "")
                 if not token:
+                    self._health_cache_val = False
+                    self._health_cache_time = now
                     return False
                 
                 parts = token.split(".")
@@ -58,9 +60,13 @@ class SessionInstance:
                     exp = payload.get("exp")
                     # Optionally check expiration if present (allow some buffer)
                     if exp and time.time() > (exp - 60):
+                        self._health_cache_val = False
+                        self._health_cache_time = now
                         return False
                     
                     if not payload.get("oid") or not payload.get("tid"):
+                        self._health_cache_val = False
+                        self._health_cache_time = now
                         return False
                         
                     self._health_cache_val = True

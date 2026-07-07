@@ -1,6 +1,5 @@
 """FastAPI app wiring Copilot onto the OpenAI Chat Completions API."""
 
-import threading
 import time
 import asyncio
 import secrets
@@ -14,14 +13,13 @@ from pydantic import BaseModel
 
 from copilot.models import ImageResponse
 
-from .config import MODEL_NAME, RATE_LIMIT_BURST, RATE_LIMIT_RPM
+from .config import MODEL_NAME
 from .openai_format import (
     completion_response,
     new_id,
     sse_event,
     stream_chunk,
 )
-from .prompt import messages_to_prompt
 from .schemas import ChatCompletionRequest, ClaudeMessageRequest
 from .router import router
 from .claude_format import (
@@ -37,11 +35,6 @@ from .claude_format import (
 
 app = FastAPI(title="Copilot OpenAI-compatible API", version="1.0.0")
 security = HTTPBearer(auto_error=False)
-
-_AUTH_HELP = (
-    "Copilot authentication failed or token expired. "
-    "Please re-login: run `python -m copilot login` or ensure your session/profile has a valid E5 login."
-)
 
 # (Locks and rate limits are now managed per-account in server/accounts.py)
 
@@ -522,6 +515,7 @@ def claude_messages(req: ClaudeMessageRequest, creds: HTTPAuthorizationCredentia
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
+    else:
         max_retries = 3
         reply = None
         for attempt in range(max_retries):
@@ -615,7 +609,6 @@ def login_session(session_name: str, background_tasks: BackgroundTasks):
     
     def run_browser():
         try:
-            import os
             # Ensure VNC is used if DISPLAY is set, else headless=False locally
             from copilot.browser import BrowserCopilot
             browser = BrowserCopilot(profile_dir=f"sessions/{session_name}/profile", headless=False)
@@ -628,7 +621,6 @@ def login_session(session_name: str, background_tasks: BackgroundTasks):
     return {"status": "started", "session": session_name}
 
 
-import os
 # Mount noVNC static files if available in the Docker container
 if os.path.exists("/usr/share/novnc"):
     # We define the websocket route BEFORE the static files mount so it takes precedence
