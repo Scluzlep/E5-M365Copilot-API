@@ -159,55 +159,85 @@ class Copilot(AbstractProvider):
                 if return_conversation:
                     yield Conversation(conversation_id, session.cookies.jar)
 
-            images = []
+            e5_attachments = kwargs.get("e5_attachments") or []
+            # Backwards compatibility for single image
             if image is not None:
-                data = to_bytes(image)
+                e5_attachments.append({
+                    "data": to_bytes(image),
+                    "mime_type": is_accepted_format(to_bytes(image)),
+                    "file_name": f"image_{uuid.uuid4().hex[:8]}.jpg"
+                })
+
+            images = []
+            message_annotations = []
+            
+            if e5_attachments:
                 if "m365.cloud.microsoft" in self.url:
                     import base64
-                    boundary = '----WebKitFormBoundary' + uuid.uuid4().hex
-                    data_b64 = f"data:{is_accepted_format(data)};base64,{base64.b64encode(data).decode('utf-8')}"
-                    
-                    body = (
-                        f"--{boundary}\r\n"
-                        f'Content-Disposition: form-data; name="scenario"\r\n\r\n'
-                        f'UploadImage\r\n'
-                        f'--{boundary}\r\n'
-                        f'Content-Disposition: form-data; name="conversationId"\r\n\r\n'
-                        f'{conversation_id}\r\n'
-                        f'--{boundary}\r\n'
-                        f'Content-Disposition: form-data; name="FileBase64"\r\n\r\n'
-                        f'{data_b64}\r\n'
-                        f'--{boundary}--\r\n'
-                    ).encode('utf-8')
-                    
-                    headers = {
-                        "content-type": f"multipart/form-data; boundary={boundary}",
-                    }
-                    if access_token:
-                        headers["authorization"] = f"Bearer {access_token}"
+                    for att in e5_attachments:
+                        data = att["data"]
+                        mime = att["mime_type"]
+                        fname = att["file_name"]
                         
-                    response = session.post(
-                        "https://substrate.office.com/m365Copilot/UploadFile",
-                        headers=headers,
-                        data=body,
-                    )
-                    raise_for_status(response)
-                    try:
-                        res_json = response.json()
-                        img_id = res_json.get("id") or str(uuid.uuid4())
-                        img_url = res_json.get("url") or res_json.get("FileUrl") or ""
-                    except Exception:
-                        img_id = str(uuid.uuid4())
-                        img_url = ""
-                    images.append({"type": "image", "id": img_id, "url": img_url})
+                        boundary = '----WebKitFormBoundary' + uuid.uuid4().hex
+                        data_b64 = f"data:{mime};base64,{base64.b64encode(data).decode('utf-8')}"
+                        
+                        body = (
+                            f"--{boundary}\r\n"
+                            f'Content-Disposition: form-data; name="scenario"\r\n\r\n'
+                            f'UploadImage\r\n'
+                            f'--{boundary}\r\n'
+                            f'Content-Disposition: form-data; name="conversationId"\r\n\r\n'
+                            f'{conversation_id}\r\n'
+                            f'--{boundary}\r\n'
+                            f'Content-Disposition: form-data; name="FileBase64"\r\n\r\n'
+                            f'{data_b64}\r\n'
+                            f'--{boundary}--\r\n'
+                        ).encode('utf-8')
+                        
+                        headers = {
+                            "content-type": f"multipart/form-data; boundary={boundary}",
+                        }
+                        if access_token:
+                            headers["authorization"] = f"Bearer {access_token}"
+                            
+                        response = session.post(
+                            "https://substrate.office.com/m365Copilot/UploadFile",
+                            headers=headers,
+                            data=body,
+                        )
+                        raise_for_status(response)
+                        try:
+                            res_json = response.json()
+                            file_id = res_json.get("id") or str(uuid.uuid4())
+                            file_url = res_json.get("url") or res_json.get("FileUrl") or ""
+                        except Exception:
+                            file_id = str(uuid.uuid4())
+                            file_url = ""
+                            
+                        # If it's an image, Copilot supports it in the content array.
+                        # For other files, we attach them as LocalFile in messageAnnotations.
+                        if mime.startswith("image/"):
+                            images.append({"type": "image", "id": file_id, "url": file_url})
+                        else:
+                            message_annotations.append({
+                                "id": file_id,
+                                "text": fname,
+                                "url": file_url,
+                                "messageAnnotationType": "LocalFile"
+                            })
                 else:
-                    response = session.post(
-                        f"{self.url}/c/api/attachments",
-                        headers={"content-type": is_accepted_format(data)},
-                        data=data,
-                    )
-                    raise_for_status(response)
-                    images.append({"type": "image", "id": str(uuid.uuid4()), "url": response.json().get("url")})
+                    # Non-E5 fallback (only supports single image via /attachments)
+                    for att in e5_attachments:
+                        if att["mime_type"].startswith("image/"):
+                            response = session.post(
+                                f"{self.url}/c/api/attachments",
+                                headers={"content-type": att["mime_type"]},
+                                data=att["data"],
+                            )
+                            raise_for_status(response)
+                            images.append({"type": "image", "id": str(uuid.uuid4()), "url": response.json().get("url")})
+                            break # Bing only supports one image via this API
 
             send_payload = {
                 "event": "send",
@@ -216,6 +246,8 @@ class Copilot(AbstractProvider):
                 "mode": resolved_mode,
                 "context": {},
             }
+            if message_annotations:
+                send_payload["messageAnnotations"] = message_annotations
             if resolved_gpt_id:
                 send_payload["gptId"] = resolved_gpt_id
             if resolved_options_sets:

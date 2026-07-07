@@ -5,9 +5,87 @@ turn — so we collapse the whole conversation into one piece of text.
 """
 
 from typing import Any, List, Optional, Union
+import base64
+import uuid
 
 from .schemas import ChatMessage
 
+ALLOWED_MIMES = {'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.ms-word.document.macroenabled.12', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'text/plain', 'text/csv', 'application/pdf', 'application/rtf', 'application/vnd.microsoft.loop', 'application/vnd.microsoft.fluid', 'text/tab-separated-values', 'text/html', 'text/markdown', 'application/xml', 'application/yaml', 'application/x-sh', 'text/css', 'application/json', 'text/x-java-source', 'application/javascript', 'text/jscript', 'application/sql', 'application/vnd.ms-excel.sheet.macroenabled.12', 'application/vnd.ms-powerpoint.slideshow.macroenabled.12', 'application/vnd.microsoft.page', 'image/jpeg', 'image/png', 'image/bmp', 'image/jfif', 'image/gif', 'image/pjpeg', 'image/pjp', 'image/webp'}
+
+ALLOWED_EXTS = {'.doc', '.docx', '.docm', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.csv', '.pdf', '.rtf', '.loop', '.fluid', '.tsv', '.html', '.md', '.xml', '.c', '.yaml', '.php', '.sh', '.dart', '.css', '.lua', '.config', '.utf8', '.htm', '.cpp', '.yml', '.log', '.h', '.bash', '.ini', '.json', '.java', '.pl', '.rs', '.js', '.py', '.tsx', '.cs', '.jsx', '.sql', '.xlsm', '.ppsm', '.page', '.jpg', '.jpeg', '.png', '.bmp', '.jfif', '.gif', '.pjpeg', '.pjp', '.webp'}
+
+def get_ext_for_mime(mime: str) -> str:
+    if mime == 'image/jpeg': return '.jpg'
+    if mime == 'image/png': return '.png'
+    if mime == 'application/pdf': return '.pdf'
+    if mime == 'text/csv': return '.csv'
+    if mime == 'text/html': return '.html'
+    return '.txt'
+
+def extract_files(messages: List[ChatMessage]) -> List[dict]:
+    files = []
+    for m in messages:
+        if not isinstance(m.content, list):
+            continue
+        for part in m.content:
+            if not isinstance(part, dict):
+                continue
+            
+            b64_data = None
+            mime_type = ""
+            file_name = None
+            
+            if part.get("type") == "image_url":
+                url_obj = part.get("image_url", {})
+                url = url_obj.get("url", "")
+                if url.startswith("data:"):
+                    try:
+                        header, b64_data = url.split(",", 1)
+                        mime_type = header.split(";")[0].replace("data:", "")
+                    except ValueError:
+                        continue
+            elif part.get("type") in ("image", "document", "file"):
+                source = part.get("source", {})
+                if source.get("type") == "base64":
+                    b64_data = source.get("data")
+                    mime_type = source.get("media_type", "")
+            
+            if b64_data:
+                try:
+                    data_bytes = base64.b64decode(b64_data)
+                except Exception:
+                    continue
+                
+                mime_lower = mime_type.lower()
+                is_valid_mime = mime_lower in ALLOWED_MIMES
+                
+                ext = ""
+                if "name" in part:
+                    file_name = part["name"]
+                    if "." in file_name:
+                        ext = "." + file_name.split(".")[-1].lower()
+                        
+                is_valid_ext = ext in ALLOWED_EXTS if ext else False
+                
+                if not (is_valid_mime or is_valid_ext):
+                    try:
+                        text_content = data_bytes.decode("utf-8")
+                        mime_type = "text/plain"
+                        file_name = f"upload_{uuid.uuid4().hex[:8]}.txt"
+                    except UnicodeDecodeError:
+                        continue
+                
+                if not file_name:
+                    ext = get_ext_for_mime(mime_type)
+                    file_name = f"upload_{uuid.uuid4().hex[:8]}{ext}"
+                    
+                files.append({
+                    "data": data_bytes,
+                    "mime_type": mime_type,
+                    "file_name": file_name
+                })
+                
+    return files
 
 def content_text(content: Optional[Union[str, List[Any]]]) -> str:
     """Extract plain text from a message's content (string or content-parts)."""

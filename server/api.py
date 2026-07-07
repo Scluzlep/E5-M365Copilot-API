@@ -21,7 +21,8 @@ from .openai_format import (
     stream_chunk,
 )
 from .schemas import ChatCompletionRequest, ClaudeMessageRequest
-from .router import router
+from server.prompt import messages_to_prompt, extract_files
+from server.router import router
 from .claude_format import (
     message_response,
     new_msg_id,
@@ -148,7 +149,7 @@ class StreamCleaner:
         self.buffer = ""
         return result
 
-def _stream(session, prompt: str, model: str, messages: list, conversation_id=None, plugins=None):
+def _stream(session, prompt: str, model: str, messages: list, conversation_id=None, plugins=None, files=None):
     """Yield OpenAI ``chat.completion.chunk`` SSE events for ``prompt``.
 
     ``conversation_id`` continues an existing Copilot thread; ``None`` starts a
@@ -159,7 +160,7 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
     
     # We delay yielding the initial role chunk until we successfully get the first item from Copilot.
     # This allows auth errors to propagate up before any SSE events are sent, enabling seamless session fallback.
-    stream = session.client.stream(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
+    stream = session.client.stream(prompt, conversation_id=conversation_id, model=model, plugins=plugins, e5_attachments=files)
     
     stream_iter = iter(stream)
     try:
@@ -242,11 +243,11 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
     yield "data: [DONE]\n\n"
 
 
-def _stream_claude(session, prompt: str, model: str, messages: list, plugins=None, conversation_id=None):
+def _stream_claude(session, prompt: str, model: str, messages: list, plugins=None, conversation_id=None, files=None):
     """Yield Anthropic Claude SSE events for ``prompt``."""
     msg_id = new_msg_id()
     
-    stream = session.client.stream(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
+    stream = session.client.stream(prompt, conversation_id=conversation_id, model=model, plugins=plugins, e5_attachments=files)
     
     stream_iter = iter(stream)
     try:
@@ -353,6 +354,8 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
     if not api_key:
         return JSONResponse(status_code=401, content={"error": {"message": "Missing API Key", "type": "authentication_error"}})
     
+    files = extract_files(req.messages)
+
     try:
         conversation_id, prompt, _, preferred_session = router.route(
             api_key=api_key, 
@@ -399,7 +402,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                                 conversation_id = None
                                 
                             print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
-                            yield from _stream(session, prompt, model, req.messages, conversation_id, plugins)
+                            yield from _stream(session, prompt, model, req.messages, conversation_id, plugins, files=files)
                             return  # Success, exit retry loop
                         except RuntimeError as e:
                             if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
@@ -428,7 +431,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                             conversation_id = None
                         
                         print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
-                        reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
+                        reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=plugins, e5_attachments=files)
                         break  # Success
                     except RuntimeError as e:
                         if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
@@ -495,6 +498,8 @@ def claude_messages(
         content = m.content if isinstance(m.content, str) else "".join(b.get("text", "") for b in m.content if isinstance(b, dict))
         standard_messages.append(ChatMessage(role=m.role, content=content))
         
+    files = extract_files(req.messages)
+        
     try:
         conversation_id, prompt, new_head_hash, preferred_session = router.route(
             api_key=api_key, 
@@ -523,7 +528,7 @@ def claude_messages(
                             conversation_id = None
                             
                         print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
-                        yield from _stream_claude(session, prompt, model, standard_messages, plugins=None, conversation_id=conversation_id)
+                        yield from _stream_claude(session, prompt, model, standard_messages, plugins=None, conversation_id=conversation_id, files=files)
                         return
                     except RuntimeError as e:
                         if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
@@ -550,7 +555,7 @@ def claude_messages(
                         conversation_id = None
                         
                     print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
-                    reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=None)
+                    reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=None, e5_attachments=files)
                     break
                 except RuntimeError as e:
                     if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
