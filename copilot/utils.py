@@ -10,10 +10,9 @@ from typing import List, Tuple
 from .models import ImageType
 
 
-def raise_for_status(response):
-    """Raise if the response status code indicates an error."""
-    if 400 <= response.status_code < 600:
-        raise Exception(f"HTTP {response.status_code}: {response.text}")
+def raise_for_status(resp):
+    if resp.status_code >= 400:
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
 
 
 _decoder = json.JSONDecoder()

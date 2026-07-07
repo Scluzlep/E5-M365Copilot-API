@@ -642,7 +642,7 @@ def get_config():
     return {"vnc_url": os.environ.get("VNC_URL", "")}
 
 @app.post("/api/login", dependencies=[Depends(verify_admin)])
-def login_session(session_name: str, background_tasks: BackgroundTasks):
+def login_session(session_name: str):
     """Triggers BrowserCopilot in a background thread for VNC interaction."""
     pool.add_session(session_name)
     
@@ -656,7 +656,8 @@ def login_session(session_name: str, background_tasks: BackgroundTasks):
         except Exception as e:
             print(f"Browser login failed: {e}")
             
-    background_tasks.add_task(run_browser)
+    import threading
+    threading.Thread(target=run_browser, daemon=True).start()
     return {"status": "started", "session": session_name}
 
 

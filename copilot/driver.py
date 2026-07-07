@@ -142,7 +142,7 @@ class Copilot(AbstractProvider):
                 if return_conversation:
                     yield Conversation(conversation_id, session.cookies.jar)
 
-            e5_attachments = kwargs.get("e5_attachments") or []
+            e5_attachments = kwargs.get("e5_attachments") or kwargs.get("attachments") or kwargs.get("files") or []
             # Backwards compatibility for single image
             if image is not None:
                 e5_attachments.append({
@@ -194,8 +194,21 @@ class Copilot(AbstractProvider):
                                 **CHROME_CLIENT_HINTS,
                             }
                             if access_token:
+                                parts = access_token.split('.')
+                                if len(parts) >= 2:
+                                    pad = len(parts[1]) % 4
+                                    try:
+                                        payload = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * pad).decode('utf-8'))
+                                        oid = payload.get("oid", "")
+                                        tid = payload.get("tid", "")
+                                        if oid and tid:
+                                            headers["x-anchormailbox"] = f"Oid:{oid}@{tid}"
+                                    except Exception:
+                                        pass
+                                headers["x-scenario"] = "OfficeWebIncludedCopilot"
+                                headers["x-variants"] = "feature.EnableImageSupportInUploadFile"
                                 headers["authorization"] = f"Bearer {access_token}"
-                                
+
                             resp = session.post(
                                 "https://substrate.office.com/m365Copilot/UploadFile",
                                 headers=headers,
@@ -203,11 +216,12 @@ class Copilot(AbstractProvider):
                             )
                             raise_for_status(resp)
                             res_json = resp.json()
-                            fid = res_json.get("id")
-                            furl = res_json.get("url") or res_json.get("FileUrl")
-                            if not fid or not furl:
-                                raise ValueError("Missing id or url")
-                            return fid, furl
+                            print(f"[Driver] UploadFile response ({scen}): {res_json}")
+                            file_id = res_json.get("id") or res_json.get("docId")
+                            file_url = res_json.get("url") or res_json.get("FileUrl") or ""
+                            if not file_id:
+                                raise ValueError("Missing id or docId")
+                            return file_id, file_url
 
                         try:
                             file_id, file_url = _try_upload(scenario)
@@ -222,13 +236,15 @@ class Copilot(AbstractProvider):
                             else:
                                 file_id, file_url = None, None
                                 
-                        if not file_id or not file_url:
-                            raise RuntimeError(f"Failed to upload attachment {fname}: missing id/url in Substrate response.")
+                        if not file_id:
+                            raise RuntimeError(f"Failed to upload attachment {fname}: missing id in Substrate response.")
                             
                         # If it's an image, Copilot supports it in the content array.
                         # For other files, we attach them as LocalFile in messageAnnotations.
                         if mime.startswith("image/"):
-                            images.append({"type": "image", "id": file_id, "url": file_url})
+                            img_obj = {"type": "image", "id": file_id}
+                            if file_url: img_obj["url"] = file_url
+                            images.append(img_obj)
                         else:
                             message_annotations.append({
                                 "id": file_id,
@@ -279,6 +295,8 @@ class Copilot(AbstractProvider):
             if resolved_plugins:
                 send_payload["plugins"] = resolved_plugins
 
+            if images or message_annotations:
+                print(f"[Driver] Sending WebSocket payload with attachments: {json.dumps(send_payload, indent=2, ensure_ascii=False)}")
             send_frame = json.dumps(send_payload).encode()
 
             # -----------------------------------------------------------------

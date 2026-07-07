@@ -544,7 +544,6 @@ class BrowserCopilot:
             self._page.wait_for_timeout(500)
         return self.access_token()
 
-    @staticmethod
     def _await_warmup_reply(self, timeout: int = 60) -> bool:
         """Wait for an already-sent warm-up turn to receive a reply."""
         deadline = time.time() + timeout
@@ -566,7 +565,7 @@ class BrowserCopilot:
         return {
             c["name"]: c["value"] 
             for c in raw 
-            if "microsoft.com" in c.get("domain", "") or "microsoftonline.com" in c.get("domain", "")
+            if any(domain in c.get("domain", "") for domain in ("microsoft.com", "microsoftonline.com", "office.com", "office365.com", "live.com", "bing.com"))
         }
 
     def export_auth(self, path: str = DEFAULT_AUTH_FILE, stamp: Optional[float] = None) -> dict:
