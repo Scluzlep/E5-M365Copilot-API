@@ -7,6 +7,7 @@ Speaks Microsoft 365 E5 Copilot chat protocol directly over a
 
 import base64
 import json
+import sys
 import time
 import uuid
 from select import select
@@ -203,7 +204,6 @@ class Copilot(AbstractProvider):
                         try:
                             file_id, file_url = _try_upload(scenario)
                         except Exception as e:
-                            import sys
                             print(f"[Driver] Upload failed for scenario '{scenario}' ({fname}): {e}", file=sys.stderr)
                             if scenario != "UploadImage":
                                 try:
@@ -271,7 +271,6 @@ class Copilot(AbstractProvider):
                 oid = None
                 tid = None
                 if access_token:
-                    import base64
                     try:
                         parts = access_token.split(".")
                         if len(parts) >= 2:
