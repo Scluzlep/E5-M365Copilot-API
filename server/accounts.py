@@ -109,6 +109,7 @@ class AccountPool:
         self.config_path = config_path
         self.sessions: Dict[str, SessionInstance] = {}
         self.api_keys: Dict[str, List[str]] = {} # api_key -> list of session_names
+        self._round_robin_counters: Dict[str, int] = {}
         self._config_lock = threading.Lock()
         self._session_released_cv = threading.Condition()
         self._load_config()
@@ -239,10 +240,24 @@ class AccountPool:
         acquired_session = None
         min_wait = float('inf')
         
-        # Prioritize preferred_session, then healthy sessions
+        with self._config_lock:
+            if api_key not in self._round_robin_counters:
+                self._round_robin_counters[api_key] = 0
+            # If no preferred session is provided, it's a new conversation, so advance the round-robin counter.
+            if not preferred_session:
+                self._round_robin_counters[api_key] = (self._round_robin_counters[api_key] + 1) % len(session_names)
+            current_rr_idx = self._round_robin_counters[api_key]
+
+        # Prioritize preferred_session, then healthy sessions, then round-robin order
         def sort_key(s):
             is_pref = (s.session_name == preferred_session)
-            return (not is_pref, not s.is_healthy())
+            # Find the original index of this session to compute round-robin distance
+            try:
+                original_idx = session_names.index(s.session_name)
+            except ValueError:
+                original_idx = 0
+            rr_distance = (original_idx - current_rr_idx) % len(session_names)
+            return (not is_pref, not s.is_healthy(), rr_distance)
             
         all_sessions.sort(key=sort_key)
         
