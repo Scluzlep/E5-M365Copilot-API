@@ -271,16 +271,10 @@ class Copilot(AbstractProvider):
                     if identity_type:
                         websocket_url = f"{websocket_url}&X-UserIdentityType={quote(identity_type)}"
 
-            # Debug print connection URL (with access token redacted for safety)
-            import re
-            log_url = websocket_url
-            if "access_token=" in log_url:
-                log_url = re.sub(r"access_token=[^&\s]+", "access_token=<REDACTED>", log_url)
-            elif "accessToken=" in log_url:
-                log_url = re.sub(r"accessToken=[^&\s]+", "accessToken=<REDACTED>", log_url)
-            print(f"[Driver] Connecting to WebSocket: {log_url}")
+            print("[Driver] Connecting to WebSocket...")
 
             wss = session.ws_connect(websocket_url)
+            print("[Driver] WebSocket connected successfully.")
             try:
                 if "m365.cloud.microsoft" in self.url:
                     # E5 Business Chat uses ASP.NET Core SignalR protocol
