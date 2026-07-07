@@ -107,11 +107,47 @@
         }
 
         input,
+        select,
         button {
             padding: 8px 12px;
             margin: 5px 0;
             border: 1px solid #ccc;
             border-radius: 4px;
+        }
+
+        .form-group {
+            margin-bottom: 12px;
+        }
+
+        .form-label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: #4b5563;
+            margin-bottom: 4px;
+        }
+
+        .form-control {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 10px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.15s;
+        }
+
+        .form-control:focus {
+            outline: none;
+            border-color: #2563eb;
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        }
+
+        .form-control[readonly],
+        .form-control[disabled] {
+            background-color: #f3f4f6;
+            color: #6b7280;
+            cursor: not-allowed;
         }
 
         .primary-btn {
@@ -205,8 +241,8 @@
             <div id="accounts-container">加载中...</div>
 
             <h3 style="margin-top: 30px;">添加新映射 (Add New Mapping)</h3>
-            <input type="text" id="new-apikey" placeholder="API Key (例如 sk-team)">
-            <input type="text" id="new-sessions" placeholder="Sessions (逗号分隔)">
+            <input type="text" id="new-apikey" placeholder="请输入 API Key">
+            <input type="text" id="new-sessions" placeholder="请输入关联 Session (逗号分隔)">
             <br>
             <button class="primary-btn" onclick="addAccount()">添加/追加映射</button>
         </div>
@@ -233,12 +269,29 @@
             <div id="azure-apps-container">加载中...</div>
 
             <h3 style="margin-top: 30px;">添加/更新 Azure App</h3>
-            <input type="text" id="new-azure-name" placeholder="标识名 (例如 my_azureapp)">
-            <input type="text" id="new-tenant-id" placeholder="Tenant ID (租户ID)">
-            <input type="text" id="new-client-id" placeholder="Client ID (客户端ID)">
-            <input type="password" id="new-client-secret" placeholder="Client Secret (客户端密钥)">
-            <br>
-            <button class="primary-btn" onclick="addAzureApp()">保存配置</button>
+            <div class="form-group">
+                <label class="form-label">选择或新建标志名</label>
+                <select id="azure-app-name-select" class="form-control" onchange="onAzureAppSelectChange()">
+                    <option value="">[+ 新建 Azure App]</option>
+                </select>
+            </div>
+            <div class="form-group" id="new-azure-name-group">
+                <label class="form-label">新 Azure 标志名</label>
+                <input type="text" id="new-azure-name" class="form-control" placeholder="请输入标志名">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Tenant ID (租户ID)</label>
+                <input type="text" id="new-tenant-id" class="form-control" placeholder="请输入 Tenant ID">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Client ID (客户端ID)</label>
+                <input type="text" id="new-client-id" class="form-control" placeholder="请输入 Client ID">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Client Secret (客户端密钥)</label>
+                <input type="password" id="new-client-secret" class="form-control" placeholder="请输入客户端密钥 (更新时可留空)">
+            </div>
+            <button class="primary-btn" style="width: 100%; margin-top: 5px;" onclick="addAzureApp()">保存配置</button>
         </div>
 
         <!-- Azure Mappings Panel -->
@@ -248,11 +301,25 @@
             <div id="azure-mappings-container">加载中...</div>
 
             <h3 style="margin-top: 30px;">绑定 Session</h3>
-            <input type="text" id="map-session-name" placeholder="Session Name (例如 session1)">
-            <input type="text" id="map-azure-name" placeholder="绑定的 Azure 标识名">
-            <input type="text" id="map-upn" placeholder="该用户的 UPN (邮箱)">
-            <br>
-            <button class="primary-btn" onclick="addSessionMapping()">保存绑定</button>
+            <div class="form-group">
+                <label class="form-label">选择 Session Name</label>
+                <select id="map-session-select" class="form-control" onchange="onBindSessionChange()">
+                    <option value="">-- 请选择 Session --</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">选择绑定的 Azure 标志名</label>
+                <select id="map-azure-select" class="form-control">
+                    <option value="">-- 请选择 Azure App --</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">该用户的 UPN (邮箱)</label>
+                <input type="text" id="map-upn" class="form-control" placeholder="请选择 Session 以自动读取">
+                <div id="upn-help-text" style="font-size: 12px; margin-top: 4px; color: #6b7280;"></div>
+            </div>
+            <button class="primary-btn" style="width: 100%; margin-top: 5px;"
+                onclick="addSessionMapping()">保存绑定</button>
         </div>
     </div>
 
@@ -321,6 +388,8 @@
         async function loadAccounts() {
             const res = await fetch('/api/accounts');
             const data = await res.json();
+            window.accountsData = data;
+            if (typeof updateBindSessionSelect === 'function') updateBindSessionSelect();
             const container = document.getElementById('accounts-container');
             container.innerHTML = '';
 
@@ -445,52 +514,209 @@
                 const appsData = await appsRes.json();
                 const mapData = await mapRes.json();
 
+                window.azureAppsData = appsData.azure_apps || {};
+                window.sessionMappingsData = mapData.session_mappings || {};
+
                 const appsContainer = document.getElementById('azure-apps-container');
                 appsContainer.innerHTML = '';
-                for (const [name, info] of Object.entries(appsData.azure_apps || {})) {
+                const appSelect = document.getElementById('azure-app-name-select');
+                const mapAzureSelect = document.getElementById('map-azure-select');
+
+                const currentAppSel = appSelect ? appSelect.value : '';
+                const currentMapAzureSel = mapAzureSelect ? mapAzureSelect.value : '';
+
+                if (appSelect) appSelect.innerHTML = '<option value="">[+ 新建 Azure App]</option>';
+                if (mapAzureSelect) mapAzureSelect.innerHTML = '<option value="">-- 请选择 Azure App --</option>';
+
+                for (const [name, info] of Object.entries(window.azureAppsData)) {
                     appsContainer.innerHTML += `<div class="api-key-block">
-                        <strong>${escapeHtml(name)}</strong><br>
+                        <div class="api-key-header">
+                            <strong>${escapeHtml(name)}</strong>
+                            <button class="delete-btn" onclick="deleteAzureApp('${escapeHtml(name)}')">移除</button>
+                        </div>
                         <span style="font-size:12px; color:#666;">Tenant: ${escapeHtml(info.tenant_id)}</span>
                     </div>`;
+
+                    if (appSelect) appSelect.innerHTML += `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`;
+                    if (mapAzureSelect) mapAzureSelect.innerHTML += `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`;
                 }
+                if (appSelect && currentAppSel) appSelect.value = currentAppSel;
+                if (mapAzureSelect && currentMapAzureSel) mapAzureSelect.value = currentMapAzureSel;
+
+                onAzureAppSelectChange();
 
                 const mapContainer = document.getElementById('azure-mappings-container');
                 mapContainer.innerHTML = '';
-                for (const [session, info] of Object.entries(mapData.session_mappings || {})) {
+                for (const [session, info] of Object.entries(window.sessionMappingsData)) {
                     mapContainer.innerHTML += `<div class="api-key-block">
-                        <strong>${escapeHtml(session)}</strong> -> <span style="color:#2563eb;">${escapeHtml(info.azure_name)}</span><br>
-                        <span style="font-size:12px; color:#666;">UPN: ${escapeHtml(info.upn)}</span>
+                        <div class="api-key-header">
+                            <div>
+                                <strong>${escapeHtml(session)}</strong> -> <span style="color:#2563eb;">${escapeHtml(info.azure_name)}</span><br>
+                                <span style="font-size:12px; color:#666;">UPN: ${escapeHtml(info.upn)}</span>
+                            </div>
+                            <button class="delete-btn" onclick="deleteSessionMapping('${escapeHtml(session)}')">解绑移除</button>
+                        </div>
                     </div>`;
                 }
+                updateBindSessionSelect();
             } catch (e) {
                 console.error("Failed to load azure config", e);
             }
         }
 
+        function updateBindSessionSelect() {
+            const mapSessionSelect = document.getElementById('map-session-select');
+            if (!mapSessionSelect) return;
+            const currentSel = mapSessionSelect.value;
+            mapSessionSelect.innerHTML = '<option value="">-- 请选择 Session --</option>';
+
+            const sessions = new Set();
+            if (window.accountsData && window.accountsData.api_keys) {
+                for (const sList of Object.values(window.accountsData.api_keys)) {
+                    sList.forEach(s => sessions.add(s));
+                }
+            }
+            if (window.accountsData && window.accountsData.sessions_info) {
+                for (const s of Object.keys(window.accountsData.sessions_info)) {
+                    sessions.add(s);
+                }
+            }
+
+            Array.from(sessions).sort().forEach(s => {
+                const info = window.accountsData && window.accountsData.sessions_info ? window.accountsData.sessions_info[s] : null;
+                const emailStr = (info && info.email && info.email !== 'N/A' && info.email !== 'unknown') ? ` (${info.email})` : '';
+                mapSessionSelect.innerHTML += `<option value="${escapeHtml(s)}">${escapeHtml(s)}${escapeHtml(emailStr)}</option>`;
+            });
+            if (currentSel) mapSessionSelect.value = currentSel;
+            onBindSessionChange();
+        }
+
+        function onAzureAppSelectChange() {
+            const select = document.getElementById('azure-app-name-select');
+            const nameGroup = document.getElementById('new-azure-name-group');
+            const nameInput = document.getElementById('new-azure-name');
+            const tenantInput = document.getElementById('new-tenant-id');
+            const clientInput = document.getElementById('new-client-id');
+            const secretInput = document.getElementById('new-client-secret');
+            if (!select) return;
+
+            const selectedName = select.value;
+            if (!selectedName) {
+                if (nameGroup) nameGroup.style.display = 'block';
+                if (nameInput) nameInput.value = '';
+                if (tenantInput) tenantInput.value = '';
+                if (clientInput) clientInput.value = '';
+                if (secretInput) {
+                    secretInput.value = '';
+                    secretInput.placeholder = '输入客户端密钥 (Client Secret)';
+                }
+            } else {
+                if (nameGroup) nameGroup.style.display = 'none';
+                const appInfo = window.azureAppsData ? window.azureAppsData[selectedName] : {};
+                if (tenantInput) tenantInput.value = appInfo.tenant_id || '';
+                if (clientInput) clientInput.value = appInfo.client_id || '';
+                if (secretInput) {
+                    secretInput.value = '';
+                    secretInput.placeholder = '(保持不变或输入新密钥)';
+                }
+            }
+        }
+
+        function onBindSessionChange() {
+            const select = document.getElementById('map-session-select');
+            const upnInput = document.getElementById('map-upn');
+            const helpText = document.getElementById('upn-help-text');
+            if (!select || !upnInput) return;
+
+            const sessionName = select.value;
+            if (!sessionName) {
+                upnInput.value = '';
+                upnInput.readOnly = false;
+                upnInput.placeholder = '请选择 Session 以自动读取';
+                if (helpText) helpText.innerText = '';
+                return;
+            }
+
+            const info = window.accountsData && window.accountsData.sessions_info ? window.accountsData.sessions_info[sessionName] : null;
+            const email = info ? info.email : null;
+
+            if (email && email !== 'N/A' && email !== 'unknown') {
+                upnInput.value = email;
+                upnInput.readOnly = true;
+                upnInput.placeholder = '';
+                if (helpText) {
+                    helpText.innerText = '✓ 已从 Session 自动提取登录邮箱。';
+                    helpText.style.color = '#166534';
+                }
+            } else {
+                upnInput.value = '';
+                upnInput.readOnly = false;
+                upnInput.placeholder = '无法自动读取邮箱，请手动填写该用户的 UPN';
+                if (helpText) {
+                    helpText.innerText = '⚠️ 该 Session 未能提取邮箱，请手动填入用户的 UPN。';
+                    helpText.style.color = '#d97706';
+                }
+            }
+        }
+
+        async function deleteAzureApp(name) {
+            if (!confirm(`确定要移除 Azure App "${name}" 吗？\n移除后，所有绑定该 App 的 Session 都将恢复为未绑定状态！`)) return;
+            const res = await fetch(`/api/azure_config/app/${encodeURIComponent(name)}`, { method: 'DELETE' });
+            if (!res.ok) {
+                const data = await res.json();
+                alert('移除失败: ' + (data.detail || '未知错误'));
+            } else {
+                loadAzureConfig();
+            }
+        }
+
+        async function deleteSessionMapping(sessionName) {
+            if (!confirm(`确定要解除 Session "${sessionName}" 的上传绑定吗？\n解除后，该 Session 将恢复到未绑定状态。`)) return;
+            const res = await fetch(`/api/azure_config/mapping/${encodeURIComponent(sessionName)}`, { method: 'DELETE' });
+            if (!res.ok) {
+                const data = await res.json();
+                alert('解除绑定失败: ' + (data.detail || '未知错误'));
+            } else {
+                loadAzureConfig();
+            }
+        }
+
         async function addAzureApp() {
-            const name = document.getElementById('new-azure-name').value.trim();
+            const select = document.getElementById('azure-app-name-select');
+            let name = select && select.value ? select.value : document.getElementById('new-azure-name').value.trim();
             const tenant_id = document.getElementById('new-tenant-id').value.trim();
             const client_id = document.getElementById('new-client-id').value.trim();
             const client_secret = document.getElementById('new-client-secret').value.trim();
-            if (!name || !tenant_id || !client_id || !client_secret) return alert('所有字段都是必填的');
 
-            await fetch(`/api/azure_config/app/${encodeURIComponent(name)}`, {
+            if (!name || !tenant_id || !client_id) return alert('标识名、Tenant ID 和 Client ID 都是必填的');
+            if ((!select || !select.value) && !client_secret) return alert('新建 Azure App 时 Client Secret 不能为空');
+
+            const res = await fetch(`/api/azure_config/app/${encodeURIComponent(name)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ tenant_id, client_id, client_secret })
             });
-            document.getElementById('new-azure-name').value = '';
-            document.getElementById('new-tenant-id').value = '';
-            document.getElementById('new-client-id').value = '';
-            document.getElementById('new-client-secret').value = '';
-            loadAzureConfig();
+            if (!res.ok) {
+                const data = await res.json();
+                alert('保存失败: ' + (data.detail || '未知错误'));
+            } else {
+                if (select) select.value = '';
+                document.getElementById('new-azure-name').value = '';
+                document.getElementById('new-tenant-id').value = '';
+                document.getElementById('new-client-id').value = '';
+                document.getElementById('new-client-secret').value = '';
+                loadAzureConfig();
+            }
         }
 
         async function addSessionMapping() {
-            const session_name = document.getElementById('map-session-name').value.trim();
-            const azure_name = document.getElementById('map-azure-name').value.trim();
+            const selectSession = document.getElementById('map-session-select');
+            const selectAzure = document.getElementById('map-azure-select');
+            const session_name = selectSession ? selectSession.value : '';
+            const azure_name = selectAzure ? selectAzure.value : '';
             const upn = document.getElementById('map-upn').value.trim();
-            if (!session_name || !azure_name || !upn) return alert('所有字段都是必填的');
+
+            if (!session_name || !azure_name || !upn) return alert('请选择 Session、Azure App 并确认 UPN 邮箱！');
 
             const res = await fetch(`/api/azure_config/mapping/${encodeURIComponent(session_name)}`, {
                 method: 'POST',
@@ -501,8 +727,8 @@
                 const data = await res.json();
                 alert('保存失败: ' + (data.detail || '未知错误'));
             } else {
-                document.getElementById('map-session-name').value = '';
-                document.getElementById('map-azure-name').value = '';
+                if (selectSession) selectSession.value = '';
+                if (selectAzure) selectAzure.value = '';
                 document.getElementById('map-upn').value = '';
                 loadAzureConfig();
             }
