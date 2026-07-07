@@ -161,10 +161,8 @@ class AccountPool:
                 except Exception as e:
                     print(f"Failed to load {self.config_path}: {e}")
             
-            # Fallback to default if empty (backward compatibility)
+            # If config doesn't exist or is empty, we just start empty.
             if not self.api_keys:
-                self.api_keys["sk-default"] = ["session"]
-                self.sessions["session"] = SessionInstance("session")
                 self._save_config_unlocked()
 
     def _save_config_unlocked(self):

@@ -336,7 +336,9 @@ def list_models():
 
 @app.post("/v1/chat/completions")
 def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredentials = Depends(security)):
-    api_key = creds.credentials if creds else "sk-default"
+    api_key = creds.credentials if creds else None
+    if not api_key:
+        return JSONResponse(status_code=401, content={"error": {"message": "Missing API Key", "type": "authentication_error"}})
     
     try:
         conversation_id, prompt, _, preferred_session = router.route(
@@ -464,7 +466,9 @@ def claude_messages(
     creds: HTTPAuthorizationCredentials = Depends(security),
     x_api_key: str = Header(None)
 ):
-    api_key = x_api_key or (creds.credentials if creds else "sk-default")
+    api_key = x_api_key or (creds.credentials if creds else None)
+    if not api_key:
+        return JSONResponse(status_code=401, content={"error": {"message": "Missing API Key", "type": "authentication_error"}})
     
     from .schemas import ChatMessage
     standard_messages = []
