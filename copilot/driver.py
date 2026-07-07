@@ -184,6 +184,14 @@ class Copilot(AbstractProvider):
                             
                             headers = {
                                 "content-type": f"multipart/form-data; boundary={boundary}",
+                                "origin": "https://m365.cloud.microsoft",
+                                "referer": "https://m365.cloud.microsoft/",
+                                "user-agent": CHROME_UA,
+                                "accept-language": US_ACCEPT_LANGUAGE,
+                                "sec-fetch-dest": "empty",
+                                "sec-fetch-mode": "cors",
+                                "sec-fetch-site": "cross-site",
+                                **CHROME_CLIENT_HINTS,
                             }
                             if access_token:
                                 headers["authorization"] = f"Bearer {access_token}"
@@ -237,7 +245,17 @@ class Copilot(AbstractProvider):
                                 continue
                             response = session.post(
                                 f"{self.url}/c/api/attachments",
-                                headers={"content-type": att["mime_type"]},
+                                headers={
+                                    "content-type": att["mime_type"],
+                                    "origin": self.url,
+                                    "referer": f"{self.url}/",
+                                    "user-agent": CHROME_UA,
+                                    "accept-language": US_ACCEPT_LANGUAGE,
+                                    "sec-fetch-dest": "empty",
+                                    "sec-fetch-mode": "cors",
+                                    "sec-fetch-site": "same-origin",
+                                    **CHROME_CLIENT_HINTS,
+                                },
                                 data=att["data"],
                             )
                             raise_for_status(response)
