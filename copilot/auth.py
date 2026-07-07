@@ -97,7 +97,6 @@ def load_auth(
                 print(f"Pure API refresh rejected: {resp.text}")
         except Exception as e:
             print(f"Pure API refresh request failed: {e}. Falling back to BrowserCopilot...")
-            pass
 
     from .browser import BrowserCopilot
 

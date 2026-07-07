@@ -3,10 +3,8 @@
 import json
 import os
 import threading
-import random
 from typing import Dict, List, Optional
 from contextlib import contextmanager
-from pydantic import BaseModel
 import shutil
 
 from copilot.client import CopilotClient
@@ -28,11 +26,20 @@ class SessionInstance:
         self.client = CopilotClient(session_dir=self.session_dir)
         self.lock = threading.Lock()
         self.rate_limiter = TokenBucket(RATE_LIMIT_RPM, RATE_LIMIT_BURST)
+        self._health_cache_time = 0
+        self._health_cache_val = False
 
     def is_healthy(self) -> bool:
-        """Check if the session token is present and structurally valid/unexpired."""
+        """Check if the session token is present and structurally valid/unexpired. Caches for 10s."""
+        import time
+        now = time.time()
+        if now - self._health_cache_time < 10:
+            return self._health_cache_val
+            
         token_file = os.path.join(self.session_dir, "token.json")
         if not os.path.exists(token_file):
+            self._health_cache_val = False
+            self._health_cache_time = now
             return False
         try:
             with open(token_file, "r", encoding="utf-8") as f:
@@ -56,9 +63,13 @@ class SessionInstance:
                     if not payload.get("oid") or not payload.get("tid"):
                         return False
                         
+                    self._health_cache_val = True
+                    self._health_cache_time = now
                     return True
         except Exception:
-            return False
+            pass
+        self._health_cache_val = False
+        self._health_cache_time = now
         return False
 
     def get_info(self) -> dict:

@@ -14,8 +14,9 @@ class ConversationState:
 
 class ConversationRouter:
     def __init__(self):
-        # Maps head_hash -> ConversationState
-        self.states: Dict[str, ConversationState] = {}
+        import collections
+        # Maps head_hash -> ConversationState (used as an LRU cache)
+        self.states: collections.OrderedDict[str, ConversationState] = collections.OrderedDict()
         # Maps conversation_id -> current_head_hash
         self.active_heads: Dict[str, str] = {}
         self._lock = threading.Lock()
@@ -28,7 +29,7 @@ class ConversationRouter:
             content = content_text(m.content)
             content = re.sub(r'<think>.*?</think>\n*', '', content, flags=re.DOTALL)
             s += f"|{m.role}|{content}"
-        return hashlib.md5(s.encode("utf-8")).hexdigest()
+        return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
     def route(self, api_key: str, messages, client_provided_cid: Optional[str]) -> Tuple[Optional[str], str, str, Optional[str]]:
         """
@@ -60,6 +61,8 @@ class ConversationRouter:
         with self._lock:
             if history_hash in self.states:
                 state = self.states[history_hash]
+                # Move to end to mark as recently used
+                self.states.move_to_end(history_hash)
                 prompt = content_text(last_msg.content)
                 # Add a cue if it's from a user, though Copilot usually figures it out.
                 if last_msg.role != "user":
@@ -81,10 +84,9 @@ class ConversationRouter:
                 self.states[new_head_hash] = ConversationState(conversation_id, new_head_hash, session_name)
                 self.active_heads[conversation_id] = new_head_hash
                 
-                # Evict oldest states if it grows too large
+                # Evict oldest states if it grows too large (FIFO from OrderedDict)
                 while len(self.states) > 10000:
-                    oldest_key = next(iter(self.states))
-                    old_state = self.states.pop(oldest_key)
+                    oldest_key, old_state = self.states.popitem(last=False)
                     self.active_heads.pop(old_state.conversation_id, None)
 
 # Global router instance

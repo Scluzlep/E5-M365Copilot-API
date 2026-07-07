@@ -2,10 +2,15 @@
 
 import threading
 import time
+import asyncio
+import secrets
+import os
 
-from fastapi import FastAPI, Depends
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, Depends, BackgroundTasks, HTTPException, status, WebSocket, Request
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel
 
 from copilot.models import ImageResponse
 
@@ -27,8 +32,7 @@ from .claude_format import (
     stream_content_block_delta,
     stream_content_block_stop,
     stream_message_delta,
-    stream_message_stop,
-    sse_event as claude_sse_event
+    stream_message_stop
 )
 
 app = FastAPI(title="Copilot OpenAI-compatible API", version="1.0.0")
@@ -44,6 +48,11 @@ _AUTH_HELP = (
 from .accounts import pool, RateLimitExceeded
 
 import re
+
+_RE_BRACKET_CITE = re.compile(r'【\d+-[a-zA-Z0-9]+】')
+_RE_UNICODE_CITE = re.compile(r'\ue200cite((?:\ue202turn\d+search\d+)+)\ue201')
+_RE_OLD_CITE = re.compile(r'\u200b?cite((?:turn\d+search\d+)+)\u200b?')
+_RE_E200_STRIP = re.compile(r'\ue200.*')
 
 class StreamCleaner:
     def __init__(self):
@@ -76,12 +85,12 @@ class StreamCleaner:
 
     def process(self, chunk: str) -> str:
         self.buffer += chunk
-        self.buffer = re.sub(r'【\d+-[a-zA-Z0-9]+】', '', self.buffer)
+        self.buffer = _RE_BRACKET_CITE.sub('', self.buffer)
         
         # New Copilot cite format: citeturn1search20 (\ue200cite\ue202turn...\ue201)
-        self.buffer = re.sub(r'\ue200cite((?:\ue202turn\d+search\d+)+)\ue201', self._replace_citations, self.buffer)
+        self.buffer = _RE_UNICODE_CITE.sub(self._replace_citations, self.buffer)
         # Old cite format fallback / Strip unicode-stripped remnants
-        self.buffer = re.sub(r'\u200b?cite((?:turn\d+search\d+)+)\u200b?', self._replace_citations, self.buffer)
+        self.buffer = _RE_OLD_CITE.sub(self._replace_citations, self.buffer)
         self.buffer = self.buffer.replace('\u200b', '')
         
         idx_bracket = self.buffer.rfind('【')
@@ -110,10 +119,10 @@ class StreamCleaner:
             return output
 
     def flush(self) -> str:
-        self.buffer = re.sub(r'【\d+-[a-zA-Z0-9]+】', '', self.buffer)
-        self.buffer = re.sub(r'\ue200cite((?:\ue202turn\d+search\d+)+)\ue201', self._replace_citations, self.buffer)
-        self.buffer = re.sub(r'\u200b?cite((?:turn\d+search\d+)+)\u200b?', self._replace_citations, self.buffer)
-        self.buffer = re.sub(r'\ue200.*', '', self.buffer)
+        self.buffer = _RE_BRACKET_CITE.sub('', self.buffer)
+        self.buffer = _RE_UNICODE_CITE.sub(self._replace_citations, self.buffer)
+        self.buffer = _RE_OLD_CITE.sub(self._replace_citations, self.buffer)
+        self.buffer = _RE_E200_STRIP.sub('', self.buffer)
         
         result = self.buffer.replace('\u200b', '')
         
@@ -227,11 +236,11 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
     yield "data: [DONE]\n\n"
 
 
-def _stream_claude(session, prompt: str, model: str, messages: list, plugins=None):
+def _stream_claude(session, prompt: str, model: str, messages: list, plugins=None, conversation_id=None):
     """Yield Anthropic Claude SSE events for ``prompt``."""
     msg_id = new_msg_id()
     
-    stream = session.client.stream(prompt, conversation_id=None, model=model, plugins=plugins)
+    stream = session.client.stream(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
     
     stream_iter = iter(stream)
     try:
@@ -293,6 +302,12 @@ def _stream_claude(session, prompt: str, model: str, messages: list, plugins=Non
             
         if in_thought:
             yield stream_content_block_delta(index=0, text="\n</thinking>\n")
+
+        if stream.conversation_id:
+            from .schemas import ChatMessage
+            updated_messages = messages + [ChatMessage(role="assistant", content=final_text, reasoning_content=final_thought if final_thought else None)]
+            new_head_hash = router._hash_messages(updated_messages)
+            router.save_state(new_head_hash, stream.conversation_id, session.session_name)
 
         yield stream_content_block_stop(index=0)
         yield stream_message_delta(stop_reason="end_turn")
@@ -368,8 +383,8 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                 # Try up to 3 different sessions from the pool if auth fails
                 max_retries = 3
                 for attempt in range(max_retries):
-                    try:
-                        with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                    with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                        try:
                             if preferred_session and session.session_name != preferred_session:
                                 # We fell back to a different account; Copilot conversation IDs are tied to accounts,
                                 # so we must start a fresh conversation instead of failing.
@@ -377,17 +392,17 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                                 
                             yield from _stream(session, prompt, model, req.messages, conversation_id, plugins)
                             return  # Success, exit retry loop
-                    except RuntimeError as e:
-                        if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
-                            print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
-                            # Force this session to be unhealthy by removing its token, so the next acquire picks a different session
-                            session.client.invalidate_auth()
-                            # Clear preferred_session so pool.acquire_session is free to pick the next best healthy session
-                            preferred_session = None
-                            if attempt == max_retries - 1:
-                                raise
-                            continue
-                        raise
+                        except RuntimeError as e:
+                            if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
+                                print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
+                                # Force this session to be unhealthy by removing its token, so the next acquire picks a different session
+                                session.client.invalidate_auth()
+                                # Clear preferred_session so pool.acquire_session is free to pick the next best healthy session
+                                preferred_session = None
+                                if attempt == max_retries - 1:
+                                    raise
+                                continue
+                            raise
     
             return StreamingResponse(
                 stream_wrapper(),
@@ -396,23 +411,28 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
             )
         else:
             max_retries = 3
+            reply = None
             for attempt in range(max_retries):
-                try:
-                    with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                    try:
                         if preferred_session and session.session_name != preferred_session:
                             conversation_id = None
                         
                         reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
                         break  # Success
-                except RuntimeError as e:
-                    if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
-                        print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
-                        session.client.invalidate_auth()
-                        preferred_session = None
-                        if attempt == max_retries - 1:
-                            raise
-                        continue
-                    raise
+                    except RuntimeError as e:
+                        if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
+                            print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
+                            session.client.invalidate_auth()
+                            preferred_session = None
+                            if attempt == max_retries - 1:
+                                raise
+                            continue
+                        raise
+            
+            if reply is None:
+                raise Exception("Failed to acquire reply after retries")
+                
             final_text = reply.text
             if reply.images:
                 for img in reply.images:
@@ -460,7 +480,7 @@ def claude_messages(req: ClaudeMessageRequest, creds: HTTPAuthorizationCredentia
         standard_messages.append(ChatMessage(role=m.role, content=content))
         
     try:
-        _, prompt, _, preferred_session = router.route(
+        conversation_id, prompt, new_head_hash, preferred_session = router.route(
             api_key=api_key, 
             messages=standard_messages, 
             client_provided_cid=None
@@ -478,13 +498,39 @@ def claude_messages(req: ClaudeMessageRequest, creds: HTTPAuthorizationCredentia
 
     if req.stream:
         def stream_wrapper():
-            nonlocal preferred_session
+            nonlocal preferred_session, conversation_id
             max_retries = 3
             for attempt in range(max_retries):
-                try:
-                    with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
-                        yield from _stream_claude(session, prompt, model, standard_messages, plugins=None)
+                with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                    try:
+                        if preferred_session and session.session_name != preferred_session:
+                            conversation_id = None
+                        yield from _stream_claude(session, prompt, model, standard_messages, plugins=None, conversation_id=conversation_id)
                         return
+                    except RuntimeError as e:
+                        if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
+                            print(f"[API] Claude session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
+                            session.client.invalidate_auth()
+                            preferred_session = None
+                            if attempt == max_retries - 1:
+                                raise
+                            continue
+                        raise
+
+        return StreamingResponse(
+            stream_wrapper(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+        max_retries = 3
+        reply = None
+        for attempt in range(max_retries):
+            with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                try:
+                    if preferred_session and session.session_name != preferred_session:
+                        conversation_id = None
+                    reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=None)
+                    break
                 except RuntimeError as e:
                     if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
                         print(f"[API] Claude session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
@@ -494,47 +540,24 @@ def claude_messages(req: ClaudeMessageRequest, creds: HTTPAuthorizationCredentia
                             raise
                         continue
                     raise
-
-        return StreamingResponse(
-            stream_wrapper(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-        )
-    else:
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
-                    reply = session.client.chat(prompt, conversation_id=None, model=model, plugins=None)
-                    break
-            except RuntimeError as e:
-                if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
-                    print(f"[API] Claude session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
-                    session.client.invalidate_auth()
-                    preferred_session = None
-                    if attempt == max_retries - 1:
-                        raise
-                    continue
-                raise
-                
+                    
+        if reply is None:
+            return JSONResponse(status_code=500, content={"error": {"message": "upstream request failed", "type": "upstream_error"}})
+            
         final_text = reply.text
         if reply.images:
             for img in reply.images:
                 if img.url:
                     final_text += f"\n\n![Generated Image]({img.url})"
                     
+        if reply.conversation_id:
+            from .schemas import ChatMessage
+            updated_messages = standard_messages + [ChatMessage(role="assistant", content=final_text)]
+            new_head_hash = router._hash_messages(updated_messages)
+            router.save_state(new_head_hash, reply.conversation_id, session.session_name)
+                    
         return message_response(final_text, model)
 
-
-from fastapi import BackgroundTasks, Depends, HTTPException, status, WebSocket
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-import asyncio
-from fastapi.responses import HTMLResponse
-import secrets
-import os
-
-from fastapi import Request
 
 def verify_admin(request: Request):
     expected_pass = os.environ.get("WEB_AUTH_PASSWORD")
