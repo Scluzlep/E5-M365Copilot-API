@@ -353,8 +353,6 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
     api_key = creds.credentials if creds else None
     if not api_key:
         return JSONResponse(status_code=401, content={"error": {"message": "Missing API Key", "type": "authentication_error"}})
-    
-    files = extract_files(req.messages)
 
     try:
         conversation_id, prompt, _, preferred_session = router.route(
@@ -364,6 +362,11 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
         )
     except ValueError as e:
         return JSONResponse(status_code=401, content={"error": {"message": str(e), "type": "auth_error"}})
+
+    try:
+        files = extract_files(req.messages, last_turn_only=(conversation_id is not None))
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": {"message": str(e), "type": "invalid_request_error"}})
 
     if not prompt.strip():
         return JSONResponse(
@@ -498,8 +501,6 @@ def claude_messages(
         content = m.content if isinstance(m.content, str) else "".join(b.get("text", "") for b in m.content if isinstance(b, dict))
         standard_messages.append(ChatMessage(role=m.role, content=content))
         
-    files = extract_files(req.messages)
-        
     try:
         conversation_id, prompt, new_head_hash, preferred_session = router.route(
             api_key=api_key, 
@@ -508,6 +509,11 @@ def claude_messages(
         )
     except ValueError as e:
         return JSONResponse(status_code=401, content={"error": {"message": str(e), "type": "authentication_error"}})
+
+    try:
+        files = extract_files(req.messages, last_turn_only=(conversation_id is not None))
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"type": "error", "error": {"type": "invalid_request_error", "message": str(e)}})
 
     if not prompt.strip():
         return JSONResponse(

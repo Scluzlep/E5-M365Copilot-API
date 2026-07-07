@@ -6,6 +6,7 @@ low-level engine; most callers should use :class:`copilot.client.CopilotClient`.
 See :mod:`copilot.browser` for the Playwright-backed fallback.
 """
 
+import base64
 import json
 import time
 import uuid
@@ -168,12 +169,14 @@ class Copilot(AbstractProvider):
                     "file_name": f"image_{uuid.uuid4().hex[:8]}.jpg"
                 })
 
+            if len(e5_attachments) > 3:
+                raise ValueError("At most 3 files can be uploaded per turn.")
+
             images = []
             message_annotations = []
             
             if e5_attachments:
                 if "m365.cloud.microsoft" in self.url:
-                    import base64
                     for att in e5_attachments:
                         data = att["data"]
                         mime = att["mime_type"]
@@ -209,11 +212,14 @@ class Copilot(AbstractProvider):
                         raise_for_status(response)
                         try:
                             res_json = response.json()
-                            file_id = res_json.get("id") or str(uuid.uuid4())
-                            file_url = res_json.get("url") or res_json.get("FileUrl") or ""
+                            file_id = res_json.get("id")
+                            file_url = res_json.get("url") or res_json.get("FileUrl")
                         except Exception:
-                            file_id = str(uuid.uuid4())
-                            file_url = ""
+                            file_id = None
+                            file_url = None
+                            
+                        if not file_id or not file_url:
+                            raise RuntimeError(f"Failed to upload attachment {fname}: missing id/url in Substrate response.")
                             
                         # If it's an image, Copilot supports it in the content array.
                         # For other files, we attach them as LocalFile in messageAnnotations.
@@ -230,6 +236,9 @@ class Copilot(AbstractProvider):
                     # Non-E5 fallback (only supports single image via /attachments)
                     for att in e5_attachments:
                         if att["mime_type"].startswith("image/"):
+                            if images:
+                                print(f"[Driver] Warning: Non-E5 endpoint only supports a single image. Dropping additional attachment: {att['file_name']}")
+                                continue
                             response = session.post(
                                 f"{self.url}/c/api/attachments",
                                 headers={"content-type": att["mime_type"]},
@@ -237,7 +246,8 @@ class Copilot(AbstractProvider):
                             )
                             raise_for_status(response)
                             images.append({"type": "image", "id": str(uuid.uuid4()), "url": response.json().get("url")})
-                            break # Bing only supports one image via this API
+                        else:
+                            print(f"[Driver] Warning: Non-E5 endpoint does not support non-image attachment: {att['file_name']}")
 
             send_payload = {
                 "event": "send",
