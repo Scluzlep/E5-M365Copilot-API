@@ -74,11 +74,8 @@ class StreamCleaner:
                 self.ref_counter += 1
             idx = self.ref_map[ref]
             
-            cite_info = self.citations.get(ref)
-            if cite_info and cite_info.get("url"):
-                replacements.append(f"[[{idx}]]({cite_info['url']})")
-            else:
-                replacements.append(f"[{idx}]")
+            # Inline we just put [1]
+            replacements.append(f"[{idx}]")
                 
         return "".join(replacements)
 
