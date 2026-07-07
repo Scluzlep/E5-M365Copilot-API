@@ -16,7 +16,7 @@ from .schemas import ChatMessage
 
 class RemoteImageCache:
     """Bounded LRU cache for remote image URLs fetched via requests."""
-    def __init__(self, max_items: int = 50, max_bytes_per_image: int = 10 * 1024 * 1024):
+    def __init__(self, max_items: int = 10, max_bytes_per_image: int = 10 * 1024 * 1024):
         self.max_items = max_items
         self.max_bytes_per_image = max_bytes_per_image
         self.cache: collections.OrderedDict[str, Tuple[str, bytes]] = collections.OrderedDict()
@@ -55,7 +55,7 @@ class RemoteImageCache:
             print(f"[Prompt] Failed to fetch remote image {url}: {e}")
             return None
 
-image_cache = RemoteImageCache(max_items=50)
+image_cache = RemoteImageCache(max_items=10)
 
 ALLOWED_MIMES = {
     'application/msword',
@@ -202,6 +202,22 @@ def extract_files(messages: List[ChatMessage], last_turn_only: bool = False) -> 
                 if source.get("type") == "base64":
                     b64_data = source.get("data")
                     mime_type = source.get("media_type", "")
+                elif source.get("type") in ("url", "http", "https") or source.get("url"):
+                    url = source.get("url") or source.get("data", "")
+                    if isinstance(url, str) and (url.startswith("http://") or url.startswith("https://")):
+                        if len(files) >= 3:
+                            raise ValueError("At most 3 files can be uploaded per turn.")
+                        res = image_cache.get_or_fetch(url)
+                        if res:
+                            mime_type, data_bytes = res
+                            ext = get_ext_for_mime(mime_type)
+                            file_name = f"image_{uuid.uuid4().hex[:8]}{ext}"
+                            files.append({
+                                "data": data_bytes,
+                                "mime_type": mime_type,
+                                "file_name": file_name
+                            })
+                        continue
             
             if b64_data:
                 if len(files) >= 3:
