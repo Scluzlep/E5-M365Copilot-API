@@ -164,7 +164,9 @@ class BrowserCopilot:
         # (e.g. federated Google logins), where _FIND_TOKEN_JS cannot read it.
         self._captured_chat_token: Optional[str] = None
         self._captured_identity_type: Optional[str] = None
+        self._captured_refresh_token: Optional[str] = None
         self._ws_listener_installed = False
+        self._network_listener_installed = False
         # Set True once the page's chat socket streams a reply (an ``appendText``
         # frame). This is auto_clear's true success signal: a reply means the
         # browser turn passed the Cloudflare gate, so its cookies are worth
@@ -295,6 +297,7 @@ class BrowserCopilot:
         self.close()
         self.start(headless=False)
         self._install_ws_listener()
+        self._install_network_listener()
 
         log = self._open_login_log(Path(path).resolve().parent / "login.log")
         log(f"login started; browser open at {COPILOT_URL}")
@@ -471,6 +474,26 @@ class BrowserCopilot:
         except PlaywrightError:
             pass
 
+    def _install_network_listener(self) -> None:
+        """Capture the refresh token from network responses during login redirects."""
+        if getattr(self, "_network_listener_installed", False) or self._page is None:
+            return
+
+        def on_response(response):
+            try:
+                if "login.microsoftonline.com" in response.url and "/oauth2/v2.0/token" in response.url:
+                    body = response.json()
+                    if "refresh_token" in body:
+                        self._captured_refresh_token = body["refresh_token"]
+            except Exception:
+                pass
+
+        try:
+            self._page.on("response", on_response)
+            self._network_listener_installed = True
+        except PlaywrightError:
+            pass
+
     def _on_chat_frame(self, payload) -> None:
         """Flag a passed turn when the chat socket streams reply content.
 
@@ -527,6 +550,7 @@ class BrowserCopilot:
         """
         self._ensure_started()
         self._install_ws_listener()
+        self._install_network_listener()
 
         tok = self.access_token()
         if tok or not warmup:
@@ -725,6 +749,7 @@ class BrowserCopilot:
         """
         self._ensure_started()
         self._install_ws_listener()
+        self._install_network_listener()
         mode = "headless" if self.headless else "visible"
         self._clear_log(f"loaded Copilot ({mode}); checking Cloudflare clearance")
 
@@ -774,7 +799,11 @@ class BrowserCopilot:
             raw = self._context.cookies()
         except PlaywrightError:
             return {}
-        return {c["name"]: c["value"] for c in raw if "microsoft.com" in c.get("domain", "")}
+        return {
+            c["name"]: c["value"] 
+            for c in raw 
+            if "microsoft.com" in c.get("domain", "") or "microsoftonline.com" in c.get("domain", "")
+        }
 
     def export_auth(self, path: str = DEFAULT_AUTH_FILE, stamp: Optional[float] = None) -> dict:
         """Snapshot the signed-in cookies + access token to ``path`` as JSON.
@@ -785,6 +814,7 @@ class BrowserCopilot:
         auth = {
             "cookies": self.cookies(),
             "access_token": self.access_token(),
+            "refresh_token": getattr(self, "_captured_refresh_token", None),
             # Federated logins (Google) ride an extra &X-UserIdentityType= on the
             # chat socket; the drivers replay it. None for Microsoft accounts.
             "identity_type": self._captured_identity_type,

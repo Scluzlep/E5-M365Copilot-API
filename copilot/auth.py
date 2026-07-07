@@ -44,6 +44,7 @@ def load_auth(
                                     access_token=auth["access_token"])
     """
     p = Path(path)
+    cached = {}
     if p.exists():
         try:
             cached = json.loads(p.read_text(encoding="utf-8"))
@@ -52,12 +53,55 @@ def load_auth(
         except (ValueError, OSError):
             pass  # corrupt/unreadable -> refresh below
 
+    # Attempt Pure API Refresh if we have a refresh_token
+    import os
+    rt = cached.get("refresh_token")
+    
+    # Seed from manual_rt.txt if available and not yet cached
+    if not rt and os.path.exists("manual_rt.txt"):
+        try:
+            with open("manual_rt.txt", "r", encoding="utf-8") as f:
+                rt = f.read().strip()
+            print("Loaded Refresh Token from manual_rt.txt!")
+        except Exception:
+            pass
+
+    if rt:
+        import requests
+        
+        # Use OfficeHome Client ID to mint Copilot Scope
+        office_client = "4765445b-32c6-49b0-83e6-1d93765276ca"
+        url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+        headers = {
+            "Origin": "https://www.office.com"
+        }
+        data = {
+            "grant_type": "refresh_token",
+            "client_id": office_client,
+            "refresh_token": rt,
+            "scope": "https://substrate.office.com/sydney/.default openid profile offline_access"
+        }
+        
+        try:
+            resp = requests.post(url, data=data, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                token_json = resp.json()
+                if "access_token" in token_json:
+                    cached["access_token"] = token_json["access_token"]
+                    cached["refresh_token"] = token_json.get("refresh_token", rt) # Store the new RT!
+                    cached["saved_at"] = time.time()
+                    p.write_text(json.dumps(cached, indent=2), encoding="utf-8")
+                    print("Token refreshed via Pure API!")
+                    return cached
+            else:
+                print(f"Pure API refresh rejected: {resp.text}")
+        except Exception as e:
+            print(f"Pure API refresh request failed: {e}. Falling back to BrowserCopilot...")
+            pass
+
     from .browser import BrowserCopilot
 
-    # Try a headless read first: a signed-in profile just needs a fresh token.
-    # For encrypted-cache sessions (e.g. Google) the token can't be read from
-    # storage, so acquire_chat_token warms up one turn to capture it off the chat
-    # socket; Microsoft sessions return their cached token instantly (no warm-up).
+    # Fallback to headless BrowserCopilot if API refresh failed (or no cookies)
     bot = BrowserCopilot(profile_dir=profile_dir, headless=True, proxy=proxy)
     try:
         bot.start()

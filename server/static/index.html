@@ -26,7 +26,7 @@
         .vnc-container { width: 100%; height: 600px; border: 1px solid #ddd; border-radius: 4px; background: #000; position: relative; }
         iframe { width: 100%; height: 100%; border: none; }
         .vnc-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.7); color: white; flex-direction: column; }
-        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); justify-content: center; align-items: center; z-index: 1000; }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); justify-content: center; align-items: center; z-index: 1000; backdrop-filter: blur(10px); }
         .modal { background: white; padding: 20px; border-radius: 8px; width: 300px; text-align: center; }
         .modal input { width: 90%; padding: 8px; margin: 10px 0; border: 1px solid #ddd; border-radius: 4px; }
     </style>
@@ -78,6 +78,14 @@
             if (typeof resource === 'string' && resource.startsWith('/api/')) {
                 config = config || {};
                 config.headers = config.headers || {};
+                
+                // Check if admin_pwd is expired (24h)
+                const exp = localStorage.getItem('admin_pwd_exp');
+                if (exp && Date.now() > parseInt(exp)) {
+                    localStorage.removeItem('admin_pwd');
+                    localStorage.removeItem('admin_pwd_exp');
+                }
+                
                 config.headers['X-Admin-Auth'] = localStorage.getItem('admin_pwd') || '';
                 
                 let response = await originalFetch(resource, config);
@@ -95,6 +103,7 @@
         function submitAuth() {
             const pwd = document.getElementById('auth-password').value;
             localStorage.setItem('admin_pwd', pwd);
+            localStorage.setItem('admin_pwd_exp', Date.now() + 24 * 60 * 60 * 1000); // 24 hours
             document.getElementById('auth-modal').style.display = 'none';
             if (window._pendingFetch) {
                 const { resource, config, resolve, reject } = window._pendingFetch;
