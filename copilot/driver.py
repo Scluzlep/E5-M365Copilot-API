@@ -182,42 +182,54 @@ class Copilot(AbstractProvider):
                         mime = att["mime_type"]
                         fname = att["file_name"]
                         
-                        boundary = '----WebKitFormBoundary' + uuid.uuid4().hex
-                        data_b64 = f"data:{mime};base64,{base64.b64encode(data).decode('utf-8')}"
+                        scenario = "UploadImage" if mime.startswith("image/") else "CopilotAttachment"
                         
-                        body = (
-                            f"--{boundary}\r\n"
-                            f'Content-Disposition: form-data; name="scenario"\r\n\r\n'
-                            f'UploadImage\r\n'
-                            f'--{boundary}\r\n'
-                            f'Content-Disposition: form-data; name="conversationId"\r\n\r\n'
-                            f'{conversation_id}\r\n'
-                            f'--{boundary}\r\n'
-                            f'Content-Disposition: form-data; name="FileBase64"\r\n\r\n'
-                            f'{data_b64}\r\n'
-                            f'--{boundary}--\r\n'
-                        ).encode('utf-8')
-                        
-                        headers = {
-                            "content-type": f"multipart/form-data; boundary={boundary}",
-                        }
-                        if access_token:
-                            headers["authorization"] = f"Bearer {access_token}"
+                        def _try_upload(scen):
+                            boundary = '----WebKitFormBoundary' + uuid.uuid4().hex
+                            data_b64 = f"data:{mime};base64,{base64.b64encode(data).decode('utf-8')}"
+                            body = (
+                                f"--{boundary}\r\n"
+                                f'Content-Disposition: form-data; name="scenario"\r\n\r\n'
+                                f'{scen}\r\n'
+                                f'--{boundary}\r\n'
+                                f'Content-Disposition: form-data; name="conversationId"\r\n\r\n'
+                                f'{conversation_id}\r\n'
+                                f'--{boundary}\r\n'
+                                f'Content-Disposition: form-data; name="FileBase64"\r\n\r\n'
+                                f'{data_b64}\r\n'
+                                f'--{boundary}--\r\n'
+                            ).encode('utf-8')
                             
-                        response = session.post(
-                            "https://substrate.office.com/m365Copilot/UploadFile",
-                            headers=headers,
-                            data=body,
-                        )
-                        raise_for_status(response)
+                            headers = {
+                                "content-type": f"multipart/form-data; boundary={boundary}",
+                            }
+                            if access_token:
+                                headers["authorization"] = f"Bearer {access_token}"
+                                
+                            resp = session.post(
+                                "https://substrate.office.com/m365Copilot/UploadFile",
+                                headers=headers,
+                                data=body,
+                            )
+                            raise_for_status(resp)
+                            res_json = resp.json()
+                            fid = res_json.get("id")
+                            furl = res_json.get("url") or res_json.get("FileUrl")
+                            if not fid or not furl:
+                                raise ValueError("Missing id or url")
+                            return fid, furl
+
                         try:
-                            res_json = response.json()
-                            file_id = res_json.get("id")
-                            file_url = res_json.get("url") or res_json.get("FileUrl")
+                            file_id, file_url = _try_upload(scenario)
                         except Exception:
-                            file_id = None
-                            file_url = None
-                            
+                            if scenario != "UploadImage":
+                                try:
+                                    file_id, file_url = _try_upload("UploadImage")
+                                except Exception:
+                                    file_id, file_url = None, None
+                            else:
+                                file_id, file_url = None, None
+                                
                         if not file_id or not file_url:
                             raise RuntimeError(f"Failed to upload attachment {fname}: missing id/url in Substrate response.")
                             

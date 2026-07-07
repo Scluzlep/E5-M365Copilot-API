@@ -4,13 +4,58 @@ Copilot's protocol has no role/system channel — it takes one prompt string per
 turn — so we collapse the whole conversation into one piece of text.
 """
 
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Union, Tuple
 import base64
+import collections
+import mimetypes
+import threading
 import uuid
+import requests
 
 from .schemas import ChatMessage
 
-import mimetypes
+class RemoteImageCache:
+    """Bounded LRU cache for remote image URLs fetched via requests."""
+    def __init__(self, max_items: int = 50, max_bytes_per_image: int = 10 * 1024 * 1024):
+        self.max_items = max_items
+        self.max_bytes_per_image = max_bytes_per_image
+        self.cache: collections.OrderedDict[str, Tuple[str, bytes]] = collections.OrderedDict()
+        self.lock = threading.Lock()
+
+    def get_or_fetch(self, url: str) -> Optional[Tuple[str, bytes]]:
+        with self.lock:
+            if url in self.cache:
+                self.cache.move_to_end(url)
+                return self.cache[url]
+        
+        try:
+            resp = requests.get(url, timeout=10, stream=True)
+            resp.raise_for_status()
+            
+            content_type = resp.headers.get("content-type", "").split(";")[0].lower().strip()
+            if not content_type.startswith("image/"):
+                guessed = mimetypes.guess_type(url)[0]
+                if guessed and guessed.startswith("image/"):
+                    content_type = guessed
+                else:
+                    content_type = "image/jpeg"
+                    
+            data = b""
+            for chunk in resp.iter_content(chunk_size=8192):
+                data += chunk
+                if len(data) > self.max_bytes_per_image:
+                    return None
+                    
+            with self.lock:
+                self.cache[url] = (content_type, data)
+                while len(self.cache) > self.max_items:
+                    self.cache.popitem(last=False)
+            return content_type, data
+        except Exception as e:
+            print(f"[Prompt] Failed to fetch remote image {url}: {e}")
+            return None
+
+image_cache = RemoteImageCache(max_items=50)
 
 ALLOWED_MIMES = {
     'application/msword',
@@ -138,6 +183,20 @@ def extract_files(messages: List[ChatMessage], last_turn_only: bool = False) -> 
                         mime_type = header.split(";")[0].replace("data:", "")
                     except ValueError:
                         continue
+                elif url.startswith("http://") or url.startswith("https://"):
+                    if len(files) >= 3:
+                        raise ValueError("At most 3 files can be uploaded per turn.")
+                    res = image_cache.get_or_fetch(url)
+                    if res:
+                        mime_type, data_bytes = res
+                        ext = get_ext_for_mime(mime_type)
+                        file_name = f"image_{uuid.uuid4().hex[:8]}{ext}"
+                        files.append({
+                            "data": data_bytes,
+                            "mime_type": mime_type,
+                            "file_name": file_name
+                        })
+                    continue
             elif part.get("type") in ("image", "document", "file"):
                 source = part.get("source", {})
                 if source.get("type") == "base64":
@@ -145,13 +204,12 @@ def extract_files(messages: List[ChatMessage], last_turn_only: bool = False) -> 
                     mime_type = source.get("media_type", "")
             
             if b64_data:
+                if len(files) >= 3:
+                    raise ValueError("At most 3 files can be uploaded per turn.")
                 try:
                     data_bytes = base64.b64decode(b64_data)
                 except Exception:
                     continue
-                
-                mime_lower = mime_type.lower()
-                is_valid_mime = mime_lower in ALLOWED_MIMES
                 
                 ext = ""
                 if "name" in part:
@@ -159,6 +217,16 @@ def extract_files(messages: List[ChatMessage], last_turn_only: bool = False) -> 
                     if "." in file_name:
                         ext = "." + file_name.split(".")[-1].lower()
                         
+                if (not mime_type or mime_type.lower() == 'application/octet-stream') and file_name:
+                    guessed = mimetypes.guess_type(file_name)[0]
+                    if guessed:
+                        mime_type = guessed
+                if not mime_type:
+                    mime_type = "text/plain"
+                
+                mime_lower = mime_type.lower()
+                is_valid_mime = mime_lower in ALLOWED_MIMES
+                
                 is_valid_ext = ext in ALLOWED_EXTS if ext else False
                 
                 if not (is_valid_mime or is_valid_ext):
