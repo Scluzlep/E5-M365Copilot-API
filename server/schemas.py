@@ -26,7 +26,7 @@ class ChatCompletionRequest(BaseModel):
     plugins: Optional[List[Any]] = None
     tools: Optional[List[Any]] = None
     # Any other OpenAI fields (temperature, max_tokens, ...) are accepted and
-    # ignored — Copilot's consumer protocol doesn't expose those knobs.
+    # ignored — Copilot's protocol doesn't expose those knobs.
 
 
 class ClaudeMessage(BaseModel):

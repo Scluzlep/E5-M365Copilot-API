@@ -57,9 +57,8 @@ python -m copilot login
 ### 2. 交互登录过程
 1. 系统会自动弹出一个 **Chromium 浏览器窗口**，并导航至微软的官方 Copilot 登录页面。
 2. **关键动作**：请在弹出的浏览器中输入您的 **Microsoft E5 / 工作或学校组织账户** 并完成登录（包括您组织可能要求的双重身份验证 / MFA）。
-3. **安全校验**：如果页面弹出 Cloudflare 的 “Verify you're human” 验证码或人机交互复选框，请在浏览器中**手动点击勾选**。
-4. **自动完成**：登录成功并加载 Copilot 主界面后，底层的 Playwright 脚本会自动拦截捕获安全凭证（Token 与 Cookies），并在后台发送一条简短的“测试热身消息”。
-5. 热身成功后，**浏览器窗口会自动关闭**。此时本地命令行会提示 `Setup complete!`。
+3. **自动完成**：登录成功并加载 Copilot 主界面后，底层的 Playwright 脚本会自动拦截捕获安全凭证（Token 与 Cookies），并在后台发送一条简短的“测试热身消息”。
+4. 热身成功后，**浏览器窗口会自动关闭**。此时本地命令行会提示 `Setup complete!`。
 
 > [!IMPORTANT]
 > **全链路美国区环境伪装 (US Locale Spoofing)**
@@ -150,14 +149,14 @@ for chunk in response:
 
 ## 🔍 异常排查与诊断 (Troubleshooting)
 
-如果您在登录或调用过程中遇到验证码卡死、API 返回 503 (Clearance Required)、502 (Bad Gateway) 等情况，可运行附带的自检诊断程序：
+如果您在登录或调用过程中遇到 API 返回 401 (Unauthorized)、403 (Forbidden)、502 (Bad Gateway) 等情况，可运行附带的自检诊断程序：
 
 ```bash
 python tests/diagnostic.py
 ```
 
 - **诊断机理**：该程序会自动在一个可视化的 Chromium 浏览器中打开 Copilot 会话，要求您发送一次消息。
-- **作用**：通过这步操作，它能自动通过 Cloudflare 盾并重新捕获最新的安全指纹。
+- **作用**：通过这步操作，它能重新捕获最新的会话凭证（Cookies 与 Access Token）。
 - **输出**：在 `session/diagnostic_report.txt` 下会生成一份脱敏的诊断报告，能帮助快速定位网络、Cookie 或 Token 过期问题。
 您可以指定会话：`python tests/diagnostic.py --session session_name`，如果在无图形界面的 Linux 服务器上，可以使用 `--vnc` 参数拉起内置的 VNC 服务。
 

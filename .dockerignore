@@ -5,10 +5,17 @@ __pycache__/
 *.py[cod]
 docs/
 config.json
+accounts.json
 test.py
 main.py
+check_*.py
+parse_har.py
+*.txt
+!requirements.txt
 # Keep session secrets (cookies + token) out of the built image. Compose
 # bind-mounts ./session back in at runtime, so the server still sees it.
 session/
+sessions/
+conversations.json
 tests/
 examples/

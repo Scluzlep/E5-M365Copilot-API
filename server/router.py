@@ -15,11 +15,43 @@ class ConversationState:
 class ConversationRouter:
     def __init__(self):
         import collections
+        import os
         # Maps head_hash -> ConversationState (used as an LRU cache)
         self.states: collections.OrderedDict[str, ConversationState] = collections.OrderedDict()
         # Maps conversation_id -> current_head_hash
         self.active_heads: Dict[str, str] = {}
         self._lock = threading.Lock()
+        self.persist_path = os.path.join("sessions", "conversations.json")
+        self._load_from_disk()
+
+    def _load_from_disk(self):
+        import json, os
+        if os.path.exists(self.persist_path):
+            try:
+                with open(self.persist_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for h, item in data.get("states", {}).items():
+                    self.states[h] = ConversationState(item["conversation_id"], h, item.get("session_name", ""))
+                self.active_heads = data.get("active_heads", {})
+            except Exception as e:
+                import sys
+                print(f"[router] Failed to load persisted state: {e}", file=sys.stderr)
+
+    def _save_to_disk(self):
+        import json, os
+        try:
+            os.makedirs("sessions", exist_ok=True)
+            data = {
+                "states": {h: {"conversation_id": s.conversation_id, "session_name": s.session_name} for h, s in self.states.items()},
+                "active_heads": self.active_heads
+            }
+            tmp_path = self.persist_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp_path, self.persist_path)
+        except Exception as e:
+            import sys
+            print(f"[router] Failed to persist state: {e}", file=sys.stderr)
 
     def _hash_messages(self, messages) -> str:
         """Create a deterministic hash from a list of ChatMessage."""
@@ -87,7 +119,10 @@ class ConversationRouter:
                 # Evict oldest states if it grows too large (FIFO from OrderedDict)
                 while len(self.states) > 10000:
                     oldest_key, old_state = self.states.popitem(last=False)
-                    self.active_heads.pop(old_state.conversation_id, None)
+                    if self.active_heads.get(old_state.conversation_id) == oldest_key:
+                        self.active_heads.pop(old_state.conversation_id, None)
+                
+                self._save_to_disk()
 
 # Global router instance
 router = ConversationRouter()

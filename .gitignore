@@ -4,21 +4,25 @@ __pycache__/
 venv/
 .venv/
 
-# All session state: persistent browser profile (cookies, Cloudflare
-# clearance, sign-in) + cached auth token. Secret.
+# All session state: persistent browser profile (cookies, sign-in) + cached auth token. Secret.
 session/
+sessions/
+conversations.json
 docs/
 
 # Local config / secrets
 config.json
+accounts.json
 
-# Dev files
+# Dev files & test dumps
 test.py
 main.py
 CLAUDE.md
+check_*.py
+parse_har.py
+*.txt
+!requirements.txt
 
 # Playwright local browsers
 .browsers/
 .env
-sessions/
-session/

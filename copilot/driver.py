@@ -1,9 +1,8 @@
-"""Pure-HTTP Copilot driver.
+"""Pure-HTTP Copilot driver for Microsoft 365 E5 Substrate.
 
-Speaks Microsoft Copilot's consumer chat protocol directly over a
-Cloudflare-impersonating ``curl_cffi`` session — no browser required. This is the
-low-level engine; most callers should use :class:`copilot.client.CopilotClient`.
-See :mod:`copilot.browser` for the Playwright-backed fallback.
+Speaks Microsoft 365 E5 Copilot chat protocol directly over a
+``curl_cffi`` session. This is the low-level engine; most callers should use
+:class:`copilot.client.CopilotClient`. See :mod:`copilot.browser` for interactive login.
 """
 
 import base64
@@ -31,27 +30,13 @@ from .utils import drain_json, is_accepted_format, raise_for_status, to_bytes
 from .agent_registry import get_agent_config
 
 
-class ClearanceRequired(RuntimeError):
-    """The chat socket demanded a Cloudflare Turnstile token we can't mint here.
-
-    Copilot gates a turn behind a ``challenge`` frame with ``method`` either
-    ``null`` or ``"cloudflare"`` whenever the session's ``cf_clearance`` cookie is
-    stale or missing (confirmed by capturing the real web client: it answers a
-    ``{method:null}`` frame with a ``method:"cloudflare"`` Turnstile token). A
-    Turnstile token can only be produced by executing Cloudflare's challenge JS in
-    a real browser, so the pure-HTTP driver can't satisfy it. The caller should
-    refresh clearance in a browser (see
-    :meth:`copilot.browser.BrowserCopilot.auto_clear`) and retry the turn.
-    """
-
-
 class Copilot(AbstractProvider):
     label = "Microsoft Copilot"
     url = "https://m365.cloud.microsoft"
     working = True
     supports_stream = True
     default_model = "Copilot"
-    needs_auth = False  # consumer chat works anonymously (cookies only)
+    needs_auth = True  # E5 commercial accounts require authentication
     websocket_url = CHAT_WEBSOCKET_URL
     conversation_url = f"{url}/c/api/conversations"
 
@@ -77,17 +62,16 @@ class Copilot(AbstractProvider):
         ):
         """Stream a Copilot reply to ``prompt``.
 
-        Runs Copilot's own chat protocol over a Cloudflare-impersonating
+        Runs Copilot's own chat protocol over an HTTP/2
         ``curl_cffi`` session: ``POST /c/api/conversations`` then a chat
         WebSocket (``send`` -> proof-of-work ``challenge`` -> ``appendText``* ->
         ``done``). The challenge is solved in-process (see
         :mod:`copilot.challenges`); no browser is required.
 
         ``prompt`` is the user message sent straight to the chat socket (the
-        protocol has no separate system/role channel). Anonymous by default;
-        pass ``cookies`` and/or ``access_token`` (e.g. exported from a signed-in
-        browser session) to run as a logged-in user — required where anonymous
-        consumer chat is region-restricted.
+        protocol has no separate system/role channel). Pass ``cookies`` and/or
+        ``access_token`` (e.g. exported from a signed-in browser session) to run
+        as an authenticated E5 Substrate user.
 
         Conversation targeting (first match wins):
           * ``conversation`` — reuse an existing :class:`Conversation` object;
@@ -132,15 +116,12 @@ class Copilot(AbstractProvider):
             timeout=timeout,
             proxy=proxy,
             # Pin the TLS/HTTP2 fingerprint, then override the UA + client hints so
-            # the wire presentation is a fixed Windows Chrome. cf_clearance is bound
-            # to the earning UA; the browsers that earn it present this same string,
-            # so the driver must too — otherwise every turn is gated behind a
-            # Cloudflare Turnstile. See copilot/useragent.py.
+            # the wire presentation is a fixed Windows Chrome.
             impersonate=IMPERSONATE_TARGET,
             headers={"User-Agent": CHROME_UA, "Accept-Language": US_ACCEPT_LANGUAGE, **CHROME_CLIENT_HINTS},
             cookies=cookies,
         ) as session:
-            # Establish cookies + Cloudflare clearance (anonymous is fine).
+            # Establish session cookies.
             session.get(f"{self.url}/")
 
             if conversation is not None and conversation.conversation_id:
@@ -506,27 +487,13 @@ class Copilot(AbstractProvider):
                 event = msg.get("event")
                 if event == "challenge":
                     method = msg.get("method")
-                    # A Cloudflare Turnstile (method null/"cloudflare") can arrive
-                    # at any point — including *after* a proof-of-work challenge was
-                    # already answered this turn — and we can never mint its token
-                    # here. Surface it regardless of ``answered`` so a stale
-                    # cf_clearance becomes a clean ClearanceRequired instead of a
-                    # silent 60s idle timeout (the frame would otherwise be ignored).
-                    if method in (None, "cloudflare"):
-                        raise ClearanceRequired(
-                            "Copilot chat is gated behind a Cloudflare Turnstile "
-                            f"(challenge method={method!r}); cf_clearance is stale "
-                            "or missing. Refresh clearance in a browser "
-                            "(copilot.browser.BrowserCopilot.auto_clear) and retry."
-                        )
                     if answered:
                         continue  # already answered the PoW for this turn; ignore echo
                     token = self._solve_challenge(msg)
                     if token is None:
                         raise RuntimeError(
                             f"Unsolvable Copilot challenge (method={method!r}). "
-                            "Microsoft may have escalated to a browser-only challenge; "
-                            "fall back to copilot.browser.BrowserCopilot."
+                            "Please re-login or check session credentials."
                         )
                     wss.send(json.dumps({
                         "event": "challengeResponse",
@@ -726,16 +693,7 @@ class Copilot(AbstractProvider):
 
         Copilot's chat socket precedes the answer with a challenge frame. The
         proof-of-work variants (``hashcash``, ``copilot``) are computed in-process
-        (:mod:`copilot.challenges`). A ``None`` return means the challenge needs a
-        browser-solved token and the caller must surface that.
-
-        An *empty* challenge (``method``/``parameter`` both null) is NOT a no-op:
-        capturing the real web client showed it answers ``{method:null}`` with a
-        ``method:"cloudflare"`` Turnstile token. It only appears when
-        ``cf_clearance`` is stale, and curl_cffi can't mint a Turnstile token — so
-        we return ``None`` (the caller raises :class:`ClearanceRequired`). The old
-        "ack an empty challenge with an empty token" behaviour was wrong: it made
-        the socket wait for a token that never came and silently time out.
+        (:mod:`copilot.challenges`).
         """
         method = msg.get("method")
         parameter = msg.get("parameter")
@@ -743,5 +701,4 @@ class Copilot(AbstractProvider):
             return solve_hashcash(parameter)
         if method == "copilot" and parameter:
             return solve_copilot_challenge(parameter)
-        # method:null / 'cloudflare' (Turnstile) / unknown PoW: browser-only token.
         return None

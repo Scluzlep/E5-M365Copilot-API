@@ -408,7 +408,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                             yield from _stream(session, prompt, model, req.messages, conversation_id, plugins, files=files)
                             return  # Success, exit retry loop
                         except RuntimeError as e:
-                            if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
+                            if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
                                 print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
                                 # Force this session to be unhealthy by removing its token, so the next acquire picks a different session
                                 session.client.invalidate_auth()
@@ -437,7 +437,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                         reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=plugins, e5_attachments=files)
                         break  # Success
                     except RuntimeError as e:
-                        if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
+                        if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
                             print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
                             session.client.invalidate_auth()
                             preferred_session = None
@@ -537,7 +537,7 @@ def claude_messages(
                         yield from _stream_claude(session, prompt, model, standard_messages, plugins=None, conversation_id=conversation_id, files=files)
                         return
                     except RuntimeError as e:
-                        if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
+                        if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
                             print(f"[API] Claude session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
                             session.client.invalidate_auth()
                             preferred_session = None
@@ -564,7 +564,7 @@ def claude_messages(
                     reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=None, e5_attachments=files)
                     break
                 except RuntimeError as e:
-                    if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
+                    if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
                         print(f"[API] Claude session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
                         session.client.invalidate_auth()
                         preferred_session = None

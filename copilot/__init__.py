@@ -1,5 +1,5 @@
 """
-Copilot API - An unofficial Python wrapper for Microsoft Copilot consumer chat.
+Copilot API - A Python wrapper for Microsoft 365 E5 Substrate Copilot chat.
 
 Basic usage — one client, conversations addressed by id:
 
@@ -17,13 +17,12 @@ __version__ = '1.0.0'
 from .auth import load_auth
 from .browser import BrowserCopilot
 from .client import ChatReply, CopilotClient
-from .driver import ClearanceRequired, Copilot
+from .driver import Copilot
 
 __all__ = [
     'CopilotClient',
     'ChatReply',
     'Copilot',
-    'ClearanceRequired',
     'BrowserCopilot',
     'load_auth',
 ]

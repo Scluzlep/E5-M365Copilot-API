@@ -1,28 +1,11 @@
-"""Browser-backed sign-in and chat-token capture.
+"""Browser-backed sign-in and chat-token capture for Microsoft 365 E5 Substrate.
 
-Playwright support for the pure-HTTP :class:`copilot.client.Copilot`: it does NOT
+Playwright support for the pure-HTTP :class:`copilot.client.CopilotClient`: it does NOT
 chat. Its sole job is to establish and refresh the signed-in session that the
-HTTP driver runs on — interactive Microsoft/Google login plus headless capture of
-the Copilot chat token.
+HTTP driver runs on — interactive Microsoft login plus capture of the Copilot chat token.
 
 ``BrowserCopilot`` launches a **persistent** Playwright Chromium profile so that
-Cloudflare clearance and any sign-in survive restarts. Two responsibilities:
-
-  * :meth:`login` — opens a visible window for interactive sign-in, then warms up
-    one chat turn to mint the token and snapshots ``session/token.json``.
-  * :meth:`acquire_chat_token` — headless: returns the chat token, warming up a
-    turn to mint/capture it when the MSAL cache can't be read directly.
-
-Why a warm-up + WebSocket capture (not a localStorage read): federated *Google*
-logins store the MSAL token cache **encrypted** and only mint the
-``ChatAI.ReadWrite`` token on the first chat turn. So the token can't be read
-from storage; instead we let the page open its own ``wss://.../c/api/chat``
-socket and read ``accessToken`` (and ``X-UserIdentityType``) straight off that
-URL — see :meth:`_install_ws_listener`. Microsoft logins expose a readable token
-and skip the warm-up entirely.
-
-All actual chatting lives in :mod:`copilot.driver` (pure HTTP). Recapture token
-shapes with ``tests/diagnostic.py`` if Microsoft changes them.
+sign-in sessions survive restarts.
 """
 
 from __future__ import annotations
@@ -46,18 +29,12 @@ from .useragent import CHROME_UA, US_LOCALE, US_TIMEZONE, US_ACCEPT_LANGUAGE
 
 COPILOT_URL = "https://m365.cloud.microsoft/chat"
 
-# The Cloudflare Turnstile widget renders inside a cross-origin iframe served
-# from challenges.cloudflare.com (page-load interstitial *and* the in-chat gate).
-# We reach into that frame to click its checkbox — see _click_turnstile.
-_TURNSTILE_IFRAME = "iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']"
-
 # The one UA every browser context advertises — the same string the curl_cffi
 # driver presents (see copilot/useragent.py). Applied to *both* headless and
-# visible launches so clearance earned by either is reusable by the driver:
-# cf_clearance is bound to the earning UA, so they must all match. It also hides
-# the "HeadlessChrome/..." token headless Chromium otherwise leaks (a blatant bot
-# tell). Because CHROME_UA tracks Playwright's bundled Chromium version, the
-# override doesn't contradict the browser's native Sec-CH-UA client hint.
+# visible launches so client hints match. It also hides
+# the "HeadlessChrome/..." token headless Chromium otherwise leaks. Because
+# CHROME_UA tracks Playwright's bundled Chromium version, the override doesn't
+# contradict the browser's native Sec-CH-UA client hint.
 _STEALTH_UA = CHROME_UA
 
 # Injected into every frame to hide the residual automation tell that survives
@@ -130,8 +107,8 @@ class BrowserCopilot:
     Parameters
     ----------
     profile_dir:
-        Directory for the persistent Chromium profile (cookies, Cloudflare
-        clearance, sign-in). Reused across runs.
+        Directory for the persistent Chromium profile (cookies, sign-in).
+        Reused across runs.
     headless:
         Run without a visible window. Use ``False`` (or :meth:`login`) for the
         first interactive sign-in, then ``True`` afterwards.
@@ -150,9 +127,9 @@ class BrowserCopilot:
         self.profile_dir = str(Path(profile_dir).resolve())
         self.headless = headless
         self.nav_timeout = nav_timeout
-        # Copilot consumer chat is geo-restricted. If you are outside a supported
-        # region, route the browser through a proxy/VPN in a supported region,
-        # e.g. proxy="http://user:pass@host:port" or "socks5://host:port".
+        # E5 Substrate chat can be geo-restricted in certain network environments.
+        # If needed, route the browser through a proxy/VPN, e.g.
+        # proxy="http://user:pass@host:port" or "socks5://host:port".
         self.proxy = proxy
 
         self._pw = None
@@ -168,10 +145,8 @@ class BrowserCopilot:
         self._ws_listener_installed = False
         self._network_listener_installed = False
         # Set True once the page's chat socket streams a reply (an ``appendText``
-        # frame). This is auto_clear's true success signal: a reply means the
-        # browser turn passed the Cloudflare gate, so its cookies are worth
-        # exporting — unlike the cf_clearance value, which often stays unchanged
-        # when the browser replies using clearance it already holds.
+        # frame). This is the true success signal that the turn passed and
+        # session cookies are valid.
         self._warmup_replied = False
 
     # -- lifecycle ----------------------------------------------------------
@@ -192,14 +167,9 @@ class BrowserCopilot:
                     "--disable-blink-features=AutomationControlled",
                     f"--lang={US_LOCALE}",
                 ],
-                # Drop the "Chrome is being controlled by automated software"
-                # switch; its presence is a cheap bot tell Turnstile reads.
                 ignore_default_args=["--enable-automation"],
             )
-            # Pin the UA on every launch, headless or visible. Both must earn
-            # cf_clearance under the exact string the curl_cffi driver replays;
-            # leaving the visible window on Playwright's native UA would bind the
-            # clearance to a version the driver doesn't present, re-gating chat.
+            # Pin the UA on every launch to match standard browser client hints.
             launch_kwargs["user_agent"] = _STEALTH_UA
             if self.proxy:
                 launch_kwargs["proxy"] = self._parse_proxy(self.proxy)
@@ -211,8 +181,7 @@ class BrowserCopilot:
                 self._context.set_extra_http_headers({"Accept-Language": US_ACCEPT_LANGUAGE})
             except PlaywrightError:
                 pass
-            # Mask the residual navigator.webdriver flag for every frame, before
-            # any page script (incl. Turnstile's) runs.
+            # Mask the residual navigator.webdriver flag for every frame.
             try:
                 self._context.add_init_script(_STEALTH_INIT_JS)
             except PlaywrightError:
@@ -220,7 +189,7 @@ class BrowserCopilot:
             self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
             self._page.set_default_timeout(self.nav_timeout * 1000)
             self._page.goto(COPILOT_URL, wait_until="domcontentloaded")
-            # Give Cloudflare a moment to clear on first paint. We deliberately do
+            # Give the SPA a moment to settle on first paint. We deliberately do
             # NOT wait for "networkidle": Copilot's SPA keeps telemetry/heartbeat
             # connections open indefinitely, so the network never goes idle and the
             # wait would always time out. A short fixed settle is enough.
@@ -327,30 +296,18 @@ class BrowserCopilot:
                 break
 
         token = None
-        before = self._clearance_value()
         if detected:
-            print("Signed in — finishing setup (warm-up + Cloudflare clearance)...")
-            log("warming up to mint the chat token and earn cf_clearance")
+            print("Signed in — finishing setup (warm-up)...")
+            log("warming up to mint the chat token")
             try:
-                # A single warm-up turn does double duty: the page opens its chat
-                # socket (the WS listener reads the token off its URL) and, by
-                # passing the in-chat Cloudflare gate, earns the cf_clearance the
-                # pure-HTTP driver reuses — so the first `ask` after login needs no
-                # second browser. We click any Turnstile and wait for the reply.
                 self._warmup_replied = False
                 if self._send_warmup():
-                    self._await_gate_pass(
-                        before, timeout=max(30, int(deadline - time.time()))
-                    )
+                    self._await_warmup_reply(timeout=max(30, int(deadline - time.time())))
                 token = self.access_token()
             except PlaywrightError as exc:
                 log(f"warm-up error: {exc}")
-            cleared = self._clearance_value() != before or self._warmup_replied
             log(f"chat token captured: {'yes' if token else 'no'}"
-                f" (identity={self._captured_identity_type});"
-                f" clearance earned: {'yes' if cleared else 'no'}")
-            print("Cloudflare clearance earned." if cleared
-                  else "Note: clearance not confirmed; first request may open a browser.")
+                f" (identity={self._captured_identity_type})")
         else:
             log(f"not signed in within {timeout}s; snapshotting current state")
             print("Sign-in not detected; saving whatever session state exists.")
@@ -498,9 +455,7 @@ class BrowserCopilot:
         """Flag a passed turn when the chat socket streams reply content.
 
         An ``appendText`` (or ``imageGenerated``) frame means the warm-up reply is
-        flowing, i.e. Cloudflare let the turn through — auto_clear's success
-        signal. A ``challenge`` frame contains neither, so this never false-fires
-        on the gate itself."""
+        flowing."""
         try:
             data = payload if isinstance(payload, str) else bytes(payload).decode("utf-8", "ignore")
         except Exception:
@@ -577,220 +532,16 @@ class BrowserCopilot:
         return self.access_token()
 
     @staticmethod
-    def _clear_log(msg: str) -> None:
-        """Emit an ``auto_clear`` progress line to stderr (keeps stdout clean)."""
-        print(f"[copilot] clearance: {msg}", file=sys.stderr, flush=True)
-
-    def _clearance_value(self) -> Optional[str]:
-        """Return the current ``cf_clearance`` cookie value, or ``None``.
-
-        Cloudflare mints a *new* ``cf_clearance`` when a challenge is solved, so a
-        change in this value is the reliable signal that fresh clearance was
-        actually earned (:meth:`auto_clear` waits on it). The cookie is set on the
-        ``.copilot.microsoft.com`` domain."""
-        if self._context is None:
-            return None
-        try:
-            for c in self._context.cookies():
-                if c.get("name") == "cf_clearance":
-                    return c.get("value")
-        except PlaywrightError:
-            pass
-        return None
-
-    def _click_turnstile(self, timeout_ms: int = 4000) -> bool:
-        """Best-effort: click the Cloudflare Turnstile checkbox if one is showing.
-
-        Returns True if a checkbox was clicked. The widget lives in a cross-origin
-        Cloudflare iframe whose checkbox can sit behind nested iframes / shadow
-        roots, so we try three escalating strategies (the recursive-finder idea
-        from DrissionPage-based bypassers, adapted to Playwright):
-
-          1. Scan *all* frames — ``page.frames`` is flat and includes frames nested
-             inside shadow roots that a top-level CSS ``frame_locator`` can't
-             reach — for the Cloudflare challenge frame, and click its checkbox.
-             Playwright locators pierce open shadow roots inside that frame for us.
-          2. Fall back to the top-level ``frame_locator`` selector.
-          3. Last resort: click the iframe host element at the checkbox offset
-             (left-of-centre), where the real checkbox sits.
-
-        A click only *passes* when Cloudflare already trusts this browser; on a
-        low-trust session (datacenter/VPN IP) it can escalate to a puzzle a click
-        can't solve — :meth:`auto_clear`'s caller detects that (the turn never
-        replies) and falls back to a visible browser for a human.
-        """
-        if self._page is None:
-            return False
-        deadline = time.time() + timeout_ms / 1000
-        while True:
-            # 1. flat-frame scan (robust to shadow-root / nested-iframe nesting)
-            frame = self._find_turnstile_frame()
-            if frame is not None and self._click_in_frame(frame):
-                return True
-            # 2. top-level frame_locator, then 3. offset click on the host iframe
-            try:
-                if self._page.query_selector(_TURNSTILE_IFRAME) is not None:
-                    fl = self._page.frame_locator(_TURNSTILE_IFRAME).first
-                    for sel in ("input[type='checkbox']", "label"):
-                        try:
-                            fl.locator(sel).first.click(timeout=1500)
-                            return True
-                        except PlaywrightError:
-                            continue
-                    if self._click_turnstile_by_offset():
-                        return True
-            except PlaywrightError:
-                pass
-            if time.time() >= deadline:
-                return False
-            self._page.wait_for_timeout(300)
-
-    def _find_turnstile_frame(self):
-        """Return the Cloudflare challenge frame among all frames, or ``None``.
-
-        ``page.frames`` is a flat list of every frame in the page — including ones
-        embedded inside shadow roots — so it finds the Turnstile iframe even when a
-        top-level CSS selector can't reach it. This is the Playwright equivalent of
-        the recursive shadow-root/iframe descent the DrissionPage bypassers do."""
-        if self._page is None:
-            return None
-        try:
-            for fr in self._page.frames:
-                u = (fr.url or "").lower()
-                if "challenges.cloudflare.com" in u or "turnstile" in u:
-                    return fr
-        except PlaywrightError:
-            pass
-        return None
-
-    @staticmethod
-    def _click_in_frame(frame) -> bool:
-        """Click the Turnstile checkbox inside an already-resolved challenge frame."""
-        for sel in ("input[type='checkbox']", "label", "body"):
-            try:
-                frame.locator(sel).first.click(timeout=1500)
-                return True
-            except PlaywrightError:
-                continue
-        return False
-
-    def _click_turnstile_by_offset(self) -> bool:
-        """Click the Turnstile iframe host where the checkbox sits (left-of-centre).
-
-        A coordinate click on the host element, used when the checkbox inside the
-        frame can't be targeted directly (cross-origin isolation / odd markup)."""
-        try:
-            host = self._page.query_selector(_TURNSTILE_IFRAME)
-            if host is None:
-                return False
-            box = host.bounding_box()
-            if not box or box.get("width", 0) < 1:
-                return False
-            x = box["x"] + min(30, box["width"] / 2)
-            y = box["y"] + box["height"] / 2
-            self._page.mouse.click(x, y)
-            return True
-        except PlaywrightError:
-            return False
-
-    def _await_gate_pass(self, before_clearance: Optional[str], timeout: int = 60) -> bool:
-        """Wait for an already-sent warm-up turn to pass the Cloudflare gate.
-
-        Clicks any Turnstile checkbox that appears and returns once the turn
-        streams a reply (``appendText`` -> gate passed) or a fresh ``cf_clearance``
-        is issued, or ``timeout`` elapses. Assumes the caller already installed the
-        WS listener, reset ``_warmup_replied``, and sent the warm-up. Shared by
-        :meth:`auto_clear` and :meth:`login` so one warm-up both mints the token
-        and earns clearance. Returns whether the gate was passed."""
+    def _await_warmup_reply(self, timeout: int = 60) -> bool:
+        """Wait for an already-sent warm-up turn to receive a reply."""
         deadline = time.time() + timeout
-        clicked = False
         while time.time() < deadline:
             if self._window_closed():
-                self._clear_log("browser window was closed")
                 break
-            if self._click_turnstile(timeout_ms=1000) and not clicked:
-                clicked = True
-                self._clear_log("clicked the in-chat Turnstile checkbox")
-            # Success = the turn replied (passed the gate). A changed cf_clearance
-            # is a secondary signal for the rare case where the cookie refreshes
-            # but no reply frame is seen.
             if self._warmup_replied:
-                self._clear_log("warm-up reply received — gate passed")
-                break
-            current = self._clearance_value()
-            if current and current != before_clearance:
-                self._clear_log("fresh cf_clearance issued — gate passed")
                 break
             self._page.wait_for_timeout(500)
-        else:
-            self._clear_log(f"turn did not pass the gate within {timeout}s")
-        if not self._window_closed():
-            self._page.wait_for_timeout(1000)  # let the cookie settle to disk
-        return self._warmup_replied or (self._clearance_value() != before_clearance)
-
-    def auto_clear(
-        self, path: str = DEFAULT_AUTH_FILE, warmup: bool = True, timeout: int = 180
-    ) -> bool:
-        """Refresh Cloudflare clearance for the pure-HTTP driver, then snapshot it.
-
-        Loads Copilot and clicks any Turnstile checkbox that appears — on page
-        load and, when ``warmup`` and signed in, after sending one throwaway chat
-        turn (the in-chat Turnstile is the gate observed on the chat socket). Then
-        snapshots the refreshed cookies + token to ``path`` so the curl_cffi
-        driver can reuse the earned ``cf_clearance``.
-
-        Headless when constructed with ``headless=True`` (the default): a fully
-        automatic solve whenever Cloudflare trusts the session. When Cloudflare
-        escalates to an interactive puzzle (low-trust egress, e.g. a VPN), the
-        headless click won't pass — construct with ``headless=False`` so a human
-        can finish it. Returns True if a snapshot with cookies was written; the
-        caller verifies *real* success by retrying the chat turn (a snapshot can
-        be written even when clearance didn't actually pass).
-        """
-        self._ensure_started()
-        self._install_ws_listener()
-        self._install_network_listener()
-        mode = "headless" if self.headless else "visible"
-        self._clear_log(f"loaded Copilot ({mode}); checking Cloudflare clearance")
-
-        # Remember the pre-existing clearance so we can tell when a *fresh* one is
-        # earned. The driver only calls us because the current cf_clearance is
-        # stale, so success = this value changing (or appearing), not merely being
-        # present. We deliberately do NOT key off the captured chat token: the page
-        # opens its chat WebSocket (and we capture the token off its URL) *before*
-        # the Turnstile challenge frame arrives, so that signal fires too early and
-        # used to close the browser before the checkbox even appeared.
-        before = self._clearance_value()
-
-        # 1. Solve any challenge gating the page itself on load.
-        if self._click_turnstile():
-            self._clear_log("clicked a page-load Turnstile checkbox")
-
-        # 2. Trigger the in-chat Turnstile (the gate seen on the chat socket) with
-        #    one throwaway turn, then wait for clearance to actually refresh —
-        #    clicking any checkbox that appears (headless auto-solve) or letting a
-        #    human click it (visible window). Sending one turn is what the manual
-        #    diagnostic does to earn clearance.
-        if warmup and self.signed_in():
-            self._warmup_replied = False
-            self._clear_log("sending a warm-up turn to trigger the in-chat challenge")
-            self._send_warmup()
-            self._clear_log(f"waiting up to {timeout}s for the turn to pass the gate"
-                            + ("" if self.headless else " (click the checkbox if shown)"))
-            self._await_gate_pass(before, timeout=timeout)
-        elif warmup:
-            self._clear_log("not signed in — skipping warm-up; snapshotting state")
-
-        auth = self.export_auth(path=path, stamp=time.time())
-        # Report whether the turn actually passed the gate (reply seen or fresh
-        # clearance), not just that a snapshot was written; the client uses this to
-        # decide whether to escalate to a visible browser.
-        earned = bool(auth.get("cookies")) and (
-            self._warmup_replied or self._clearance_value() != before
-        )
-        self._clear_log("done — clearance refreshed" if earned
-                        else "done — no clearance earned")
-        return earned
+        return self._warmup_replied
 
     def cookies(self) -> Dict[str, str]:
         """Return the signed-in Microsoft cookies as a name->value dict."""

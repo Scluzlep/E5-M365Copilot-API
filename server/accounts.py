@@ -252,18 +252,18 @@ class AccountPool:
         Yields an available SessionInstance for the given API Key.
         Attempts non-blocking acquire across all bound sessions to maximize throughput.
         """
-        session_names = self.api_keys.get(api_key)
-        if not session_names:
-            raise ValueError(f"Invalid API Key: {api_key}")
-            
-        all_sessions = [self.sessions[s] for s in session_names if s in self.sessions]
-        if not all_sessions:
-            raise ValueError(f"API Key {api_key} has no valid bound sessions.")
-
         acquired_session = None
         min_wait = float('inf')
         
         with self._config_lock:
+            session_names = self.api_keys.get(api_key)
+            if not session_names:
+                raise ValueError(f"Invalid API Key: {api_key}")
+                
+            all_sessions = [self.sessions[s] for s in session_names if s in self.sessions]
+            if not all_sessions:
+                raise ValueError(f"API Key {api_key} has no valid bound sessions.")
+
             if api_key not in self._round_robin_counters:
                 self._round_robin_counters[api_key] = 0
             # If no preferred session is provided, it's a new conversation, so advance the round-robin counter.
@@ -291,7 +291,7 @@ class AccountPool:
                 if allowed:
                     if not sess.is_healthy():
                         try:
-                            # Trigger Playwright headless renewal while locked
+                            # Trigger Pure API token renewal (with browser fallback) while locked
                             sess.client._fresh_auth()
                         except Exception as e:
                             print(f"[Pool] Failed to renew session {sess.session_name}: {e}")
@@ -315,9 +315,11 @@ class AccountPool:
             any_busy = any(sess.lock.locked() for sess in all_sessions)
             
             if not any_busy:
-                # All unlocked but we couldn't get one -> Rate limit is the blocker
+                # All unlocked but we couldn't get one -> Rate limit is the blocker or renewal failed
                 if min_wait < float('inf'):
                     raise RateLimitExceeded(min_wait)
+                else:
+                    raise RuntimeError(f"All bound sessions for API Key '{api_key}' failed authentication renewal or are unhealthy.")
                     
             with self._session_released_cv:
                 # Wait for a session to be released, or timeout to re-check rate limits.

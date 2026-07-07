@@ -1,31 +1,15 @@
-"""The single User-Agent the whole bridge presents to Cloudflare.
-
-Cloudflare binds ``cf_clearance`` to the *exact* User-Agent string that earned
-it. The bridge touches that one cookie from three places — the curl_cffi chat
-driver (which *uses* it), the headless refresh, and the interactive login (which
-*earn* it) — so all three must present a byte-identical UA or the clearance is
-distrusted and the chat socket gates every turn behind a Cloudflare Turnstile.
+"""The User-Agent and Client Hints presented across HTTP requests and browser sessions.
 
 Keeping the string here (imported by both :mod:`copilot.driver` and
-:mod:`copilot.browser`) makes drift impossible.
+:mod:`copilot.browser`) ensures consistent client presentation.
 
 Why these exact values:
 
-* ``CHROME_UA`` is a real desktop **Windows** Chrome UA. We standardise on the
-  same major version Playwright actually bundles (see the maintenance note), so
-  overriding a launched Chromium's UA to this string does *not* contradict the
-  browser's native ``Sec-CH-UA`` client hint — both say the same version.
-* ``IMPERSONATE_TARGET`` pins curl_cffi to a fixed TLS/HTTP2 fingerprint. Left as
-  the bare ``"chrome"`` alias it tracks curl_cffi's ``DEFAULT_CHROME``, which
-  advances on every upgrade (and ships a *macOS* UA) — a moving target that
-  silently re-breaks the UA match. Pin to the closest stable profile instead; the
-  driver overrides the UA + client hints on top so the wire presentation stays
-  Windows/``CHROME_UA`` regardless of the profile's native UA.
-
-MAINTENANCE: bump ``CHROME_UA``'s major version whenever ``playwright install``
-upgrades the bundled Chromium (check ``chromium.launch().version``). If the
-constant lags the real browser, the browser's native ``Sec-CH-UA`` out-drifts the
-spoofed UA and Turnstile sees the mismatch. One line, one place.
+* ``CHROME_UA`` is a standard desktop **Windows** Chrome UA. We standardise on the
+  same major version Playwright actually bundles, so overriding a launched
+  Chromium's UA to this string does *not* contradict the browser's native
+  ``Sec-CH-UA`` client hint.
+* ``IMPERSONATE_TARGET`` pins curl_cffi to a fixed TLS/HTTP2 fingerprint.
 """
 
 # Real desktop Windows Chrome. Must match Playwright's bundled Chromium major

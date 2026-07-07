@@ -1,4 +1,4 @@
-"""High-level Copilot client — the recommended entry point.
+"""High-level Copilot client for Microsoft 365 E5 Substrate — the recommended entry point.
 
 One client, many conversations addressed by id. :meth:`CopilotClient.chat`
 returns the full reply plus the conversation id; pass that id back to continue
@@ -17,10 +17,8 @@ is the incremental variant.
     for chunk in client.stream("Tell me a joke"):  # new conversation, streamed
         print(chunk, end="", flush=True)
 
-The signed-in access token is refreshed transparently; sign in once with
-``python -m copilot login``. Pass ``anonymous=True`` to skip sign-in (only where
-anonymous consumer chat is available), or ``proxy=...`` to route through a
-supported region.
+The signed-in access token is refreshed transparently via OAuth API; sign in once with
+``python -m copilot login`` if initial authentication is needed.
 """
 
 import sys
@@ -120,7 +118,6 @@ class CopilotClient:
 
     def _stream_direct(self, prompt, conversation_id, model, kwargs):
         """Drive the turn directly against E5 / Enterprise Copilot."""
-        from .driver import ClearanceRequired
         retries = 1
         while retries >= 0:
             auth = self._fresh_auth()
@@ -153,8 +150,8 @@ class CopilotClient:
                     
                 return # success
                 
-            except (RuntimeError, ClearanceRequired) as e:
-                if "Failed to decode" in str(e) or isinstance(e, ClearanceRequired):
+            except RuntimeError as e:
+                if "Failed to decode" in str(e):
                     self.invalidate_auth()
                     if retries > 0:
                         retries -= 1
@@ -198,7 +195,7 @@ class CopilotClient:
         return self._auth
 
     def invalidate_auth(self) -> None:
-        """Force the next _fresh_auth to fetch a new token via the browser."""
+        """Force the next _fresh_auth to fetch a new token via API refresh."""
         import os
         self._auth = None
         token_path = f"{self._session_dir}/token.json"

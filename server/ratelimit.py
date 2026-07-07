@@ -1,6 +1,6 @@
 """A small thread-safe token-bucket rate limiter.
 
-Copilot's consumer chat publishes no rate limit, so this is a *self-imposed*
+Microsoft 365 Copilot chat publishes no explicit rate limit headers, so this is a *self-imposed*
 ceiling: a safety valve that keeps automated callers from hammering your single
 signed-in account. It is orthogonal to the concurrency lock in :mod:`server.api`
 (which caps how many requests run *at once*); this caps how many run *per minute*.
