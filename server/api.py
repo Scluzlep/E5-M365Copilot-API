@@ -123,14 +123,24 @@ class StreamCleaner:
         result = self.buffer.replace('\u200b', '')
         
         # Append references list if any
-        if self.ref_map and self.citations:
-            # Only append if we actually have valid URLs to show
+        if self.citations:
             valid_refs = []
-            for ref_id, idx in sorted(self.ref_map.items(), key=lambda x: x[1]):
-                cite_info = self.citations.get(ref_id)
-                if cite_info and cite_info.get("url"):
-                    name = cite_info.get('name') or cite_info['url']
-                    valid_refs.append(f"[{idx}] [{name}]({cite_info['url']})")
+            if self.ref_map:
+                for ref_id, idx in sorted(self.ref_map.items(), key=lambda x: x[1]):
+                    cite_info = self.citations.get(ref_id)
+                    if cite_info and cite_info.get("url"):
+                        name = cite_info.get('name') or cite_info['url']
+                        valid_refs.append(f"[{idx}] [{name}]({cite_info['url']})")
+            else:
+                seen_urls = set()
+                idx = 1
+                for ref_id, cite_info in self.citations.items():
+                    url = cite_info.get("url")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        name = cite_info.get('name') or url
+                        valid_refs.append(f"[{idx}] [{name}]({url})")
+                        idx += 1
             
             if valid_refs:
                 result += "\n\n### References\n" + "\n".join(valid_refs) + "\n"
