@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 venv/
 .venv/
+.idea/
 
 # All session state: persistent browser profile (cookies, sign-in) + cached auth token. Secret.
 session/

@@ -44,9 +44,10 @@ class ConversationRouter:
         # Must be called with self._lock held
         self._dirty = True
         if self._timer is None:
-            self._timer = threading.Timer(self._debounce_seconds, self._flush_disk)
-            self._timer.daemon = True
-            self._timer.start()
+            timer = threading.Timer(self._debounce_seconds, self._flush_disk)
+            timer.daemon = True
+            timer.start()
+            self._timer = timer
 
     def _flush_disk(self):
         with self._lock:
@@ -78,7 +79,8 @@ class ConversationRouter:
                 self._timer = None
         self._flush_disk()
 
-    def _hash_messages(self, messages) -> str:
+    @staticmethod
+    def _hash_messages(messages) -> str:
         """Create a deterministic hash from a list of ChatMessage."""
         import re
         s = ""

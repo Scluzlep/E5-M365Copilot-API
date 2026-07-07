@@ -11,11 +11,10 @@ sign-in sessions survive restarts.
 from __future__ import annotations
 
 import json
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 import os
 from urllib.parse import parse_qs, urlparse
 
@@ -159,7 +158,7 @@ class BrowserCopilot:
             self.headless = headless
         try:
             self._pw = sync_playwright().start()
-            launch_kwargs = dict(
+            launch_kwargs: Dict[str, Any] = dict(
                 headless=self.headless,
                 locale=US_LOCALE,
                 timezone_id=US_TIMEZONE,

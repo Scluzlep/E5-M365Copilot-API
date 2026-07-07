@@ -150,7 +150,7 @@ class StreamCleaner:
         self.buffer = ""
         return result
 
-def _stream(session, prompt: str, model: str, messages: list, conversation_id=None, plugins=None, files=None):
+def _stream(session, prompt: str, model: str, messages: list, conversation_id=None, plugins=None, files=None, api_key: str = ""):
     """Yield OpenAI ``chat.completion.chunk`` SSE events for ``prompt``.
 
     ``conversation_id`` continues an existing Copilot thread; ``None`` starts a
@@ -244,7 +244,7 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
     yield "data: [DONE]\n\n"
 
 
-def _stream_claude(session, prompt: str, model: str, messages: list, plugins=None, conversation_id=None, files=None):
+def _stream_claude(session, prompt: str, model: str, messages: list, plugins=None, conversation_id=None, files=None, api_key: str = ""):
     """Yield Anthropic Claude SSE events for ``prompt``."""
     msg_id = new_msg_id()
     
@@ -406,7 +406,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                                 conversation_id = None
                                 
                             print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
-                            yield from _stream(session, prompt, model, req.messages, conversation_id, plugins, files=files)
+                            yield from _stream(session, prompt, model, req.messages, conversation_id, plugins, files=files, api_key=api_key)
                             return  # Success, exit retry loop
                         except RuntimeError as e:
                             if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
@@ -535,7 +535,7 @@ def claude_messages(
                             conversation_id = None
                             
                         print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
-                        yield from _stream_claude(session, prompt, model, standard_messages, plugins=None, conversation_id=conversation_id, files=files)
+                        yield from _stream_claude(session, prompt, model, standard_messages, plugins=None, conversation_id=conversation_id, files=files, api_key=api_key)
                         return
                     except RuntimeError as e:
                         if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():

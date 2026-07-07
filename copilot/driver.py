@@ -5,12 +5,11 @@ Speaks Microsoft 365 E5 Copilot chat protocol directly over a
 :class:`copilot.client.CopilotClient`. See :mod:`copilot.browser` for interactive login.
 """
 
-import base64
 import json
 import time
 import uuid
 from select import select
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 from curl_cffi.const import CurlECode, CurlInfo
