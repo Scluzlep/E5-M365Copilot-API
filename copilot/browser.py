@@ -224,6 +224,12 @@ class BrowserCopilot:
         return "available in your region" in (text or "").lower()
 
     def close(self) -> None:
+        if getattr(self, "_context", None):
+            try:
+                if getattr(self._context, "browser", None):
+                    self._context.browser.close()
+            except Exception:
+                pass
         for attr, closer in (
             ("_context", lambda c: c.close()),
             ("_pw", lambda p: p.stop()),
@@ -238,25 +244,11 @@ class BrowserCopilot:
                 setattr(self, attr, None)
         self._page = None
 
-        # Force kill residual browser/driver child process tree as fallback
+        # Use Playwright official driver cleanup API (recommended)
         try:
-            import psutil, os
-            current_process = psutil.Process(os.getpid())
-            for child in current_process.children(recursive=True):
-                try:
-                    name = child.name().lower()
-                    if any(x in name for x in ("chrome", "chromium", "msedge", "node")):
-                        child.kill()
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-        except ImportError:
-            import subprocess, sys
-            if sys.platform.startswith("win"):
-                try:
-                    subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    subprocess.run(["taskkill", "/F", "/IM", "chromium.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    pass
+            import playwright._impl._driver as driver
+            if hasattr(driver, "cleanup"):
+                driver.cleanup()
         except Exception:
             pass
 

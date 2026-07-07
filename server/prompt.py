@@ -38,6 +38,14 @@ def is_safe_url(url: str) -> bool:
     except Exception:
         return False
 
+class SSRFProtectedSession(requests.Session):
+    """Requests Session that validates every request (initial and redirects) against SSRF rules."""
+    def send(self, request, **kwargs):
+        if not is_safe_url(request.url):
+            print(f"[Prompt] Blocked potential SSRF or unsafe URL in request/redirect: {mask_token(request.url)}")
+            raise requests.exceptions.InvalidURL(f"Blocked SSRF/unsafe URL: {mask_token(request.url)}")
+        return super().send(request, **kwargs)
+
 class RemoteImageCache:
     """Bounded LRU cache for remote image URLs fetched via requests."""
     def __init__(self, max_items: int = 10, max_bytes_per_image: int = 10 * 1024 * 1024):
@@ -57,8 +65,9 @@ class RemoteImageCache:
                 return self.cache[url]
         
         try:
-            with requests.get(url, timeout=10, stream=True) as resp:
-                resp.raise_for_status()
+            with SSRFProtectedSession() as session:
+                with session.get(url, timeout=10, stream=True) as resp:
+                    resp.raise_for_status()
                 
                 content_type = resp.headers.get("content-type", "").split(";")[0].lower().strip()
                 if not content_type.startswith("image/"):

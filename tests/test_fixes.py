@@ -34,6 +34,18 @@ res = image_cache.get_or_fetch("http://127.0.0.1:5900/secret.png")
 assert res is None, "RemoteImageCache did not block SSRF URL!"
 print("[Test 2] SSRF Protection & Image Cache: PASSED\n")
 
+# Test SSRFProtectedSession redirect protection
+from server.prompt import SSRFProtectedSession
+import requests
+print("[Test 2.1] Testing SSRFProtectedSession...")
+session = SSRFProtectedSession()
+try:
+    session.get("http://169.254.169.254/latest/meta-data/", timeout=1)
+    assert False, "SSRFProtectedSession failed to block request!"
+except requests.exceptions.InvalidURL:
+    pass
+print("[Test 2.1] SSRFProtectedSession: PASSED\n")
+
 # 3. Test Compound Routing Isolation & Debounce Persistence
 from server.router import router, ConversationState
 from server.accounts import pool, SessionInstance
