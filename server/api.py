@@ -38,8 +38,41 @@ from .claude_format import (
 app = FastAPI(title="Copilot OpenAI-compatible API", version="1.0.0")
 security = HTTPBearer(auto_error=False)
 
+import hashlib
+
+def verify_token_or_hash(token_val: str, expected_pass: str) -> bool:
+    if not token_val or "." not in token_val:
+        return False
+    try:
+        ts_str, sig_hex = token_val.split(".", 1)
+        ts = int(ts_str)
+        # 5分钟防重放窗口 (300000 毫秒)
+        if abs(time.time() * 1000 - ts) > 300000:
+            return False
+        expected_hash = hashlib.sha256(f"{ts_str}:{expected_pass}".encode("utf-8")).hexdigest()
+        return secrets.compare_digest(sig_hex, expected_hash)
+    except (ValueError, TypeError):
+        return False
+
+def verify_admin(request: Request):
+    expected_pass = os.environ.get("WEB_AUTH_PASSWORD")
+    if not expected_pass:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server misconfigured: WEB_AUTH_PASSWORD is not set."
+        )
+    
+    admin_auth = request.headers.get("X-Admin-Auth")
+    if admin_auth is not None and verify_token_or_hash(admin_auth, expected_pass):
+        return "admin"
+        
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated or incorrect password signature"
+    )
+
 from server.api_azure_config import router as azure_config_router
-app.include_router(azure_config_router)
+app.include_router(azure_config_router, dependencies=[Depends(verify_admin)])
 
 # (Locks and rate limits are now managed per-account in server/accounts.py)
 
@@ -595,23 +628,7 @@ def claude_messages(
         return message_response(final_text, model)
 
 
-def verify_admin(request: Request):
-    expected_pass = os.environ.get("WEB_AUTH_PASSWORD")
-    
-    if not expected_pass:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Server misconfigured: WEB_AUTH_PASSWORD is not set."
-        )
-    
-    admin_auth = request.headers.get("X-Admin-Auth")
-    if admin_auth is not None and secrets.compare_digest(admin_auth.encode("utf8"), expected_pass.encode("utf8")):
-        return "admin"
-        
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Not authenticated or incorrect password"
-    )
+# verify_admin has been moved up to protect routes globally
 
 
 class AddKeyRequest(BaseModel):
@@ -683,7 +700,7 @@ if os.path.exists("/usr/share/novnc"):
             or websocket.cookies.get("admin_pwd")
             or websocket.cookies.get("token")
         )
-        if not token or not secrets.compare_digest(token.encode("utf8"), expected_pass.encode("utf8")):
+        if not token or not verify_token_or_hash(token, expected_pass):
             print("[Security] Unauthorized attempt to connect to /novnc/vnc-ws")
             await websocket.close(code=1008)
             return

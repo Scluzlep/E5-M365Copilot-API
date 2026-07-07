@@ -132,12 +132,7 @@ class Copilot(AbstractProvider):
             else:
                 # E5 Business Chat does not use a REST endpoint to create conversations;
                 # it accepts any client-generated UUID as the conversationId.
-                if "m365.cloud.microsoft" in self.url:
-                    conversation_id = str(uuid.uuid4())
-                else:
-                    response = session.post(self.conversation_url)
-                    raise_for_status(response)
-                    conversation_id = response.json().get("id")
+                conversation_id = str(uuid.uuid4())
                 
                 if return_conversation:
                     yield Conversation(conversation_id, session.cookies.jar)
@@ -152,18 +147,79 @@ class Copilot(AbstractProvider):
                 })
 
             if len(e5_attachments) > 3:
-                raise ValueError("At most 3 files can be uploaded per turn.")
+                raise ValueError("每轮对话最多允许上传3个附件。")
 
             images = []
             message_annotations = []
             
             if e5_attachments:
-                if "m365.cloud.microsoft" in self.url:
-                    for att in e5_attachments:
-                        data = att["data"]
-                        mime = att["mime_type"]
-                        fname = att["file_name"]
-                        
+                for att in e5_attachments:
+                    data = att["data"]
+                    mime = att["mime_type"]
+                    fname = att["file_name"]
+                    
+                    if mime.startswith("image/"):
+                        print(f"[Driver] Uploading image {fname} to Substrate UploadFile...")
+                        boundary = '----WebKitFormBoundary' + uuid.uuid4().hex
+                        data_b64 = f"data:{mime};base64,{base64.b64encode(data).decode('utf-8')}"
+                        body = (
+                            f"--{boundary}\r\n"
+                            f'Content-Disposition: form-data; name="scenario"\r\n\r\n'
+                            f'UploadImage\r\n'
+                            f'--{boundary}\r\n'
+                            f'Content-Disposition: form-data; name="conversationId"\r\n\r\n'
+                            f'{conversation_id}\r\n'
+                            f'--{boundary}\r\n'
+                            f'Content-Disposition: form-data; name="FileBase64"\r\n\r\n'
+                            f'{data_b64}\r\n'
+                            f'--{boundary}--\r\n'
+                        ).encode('utf-8')
+
+                        headers = {
+                            "content-type": f"multipart/form-data; boundary={boundary}",
+                            "origin": "https://m365.cloud.microsoft",
+                            "referer": "https://m365.cloud.microsoft/",
+                            "user-agent": CHROME_UA,
+                            "accept-language": US_ACCEPT_LANGUAGE,
+                            "sec-fetch-dest": "empty",
+                            "sec-fetch-mode": "cors",
+                            "sec-fetch-site": "cross-site",
+                            **CHROME_CLIENT_HINTS,
+                        }
+                        if access_token:
+                            parts = access_token.split('.')
+                            if len(parts) >= 2:
+                                pad = len(parts[1]) % 4
+                                try:
+                                    payload = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * pad).decode('utf-8'))
+                                    oid = payload.get("oid", "")
+                                    tid = payload.get("tid", "")
+                                    if oid and tid:
+                                        headers["x-anchormailbox"] = f"Oid:{oid}@{tid}"
+                                except Exception:
+                                    pass
+                            headers["x-scenario"] = "OfficeWebIncludedCopilot"
+                            headers["x-variants"] = "feature.EnableImageSupportInUploadFile"
+                            headers["authorization"] = f"Bearer {access_token}"
+
+                        resp = session.post(
+                            "https://substrate.office.com/m365Copilot/UploadFile",
+                            headers=headers,
+                            data=body
+                        )
+                        raise_for_status(resp)
+                        res_json = resp.json()
+                        print(f"[Driver] UploadFile response: {res_json}")
+                        file_id = res_json.get("id") or res_json.get("docId")
+                        file_url = res_json.get("url") or res_json.get("FileUrl") or ""
+                        if not file_id:
+                            raise ValueError("Missing id or docId in Substrate response")
+                            
+                        img_obj = {"type": "image", "id": file_id}
+                        if file_url: img_obj["url"] = file_url
+                        images.append(img_obj)
+                        print(f"[Driver] Attached image {fname} to prompt via Substrate UploadFile.")
+                    else:
                         import os
                         from .azure_uploader import AzureUploader
                         
@@ -175,132 +231,100 @@ class Copilot(AbstractProvider):
                         
                         if upload_result and "id" in upload_result:
                             item_id = upload_result["id"]
-                            if mime.startswith("image/"):
-                                img_obj = {"type": "image", "id": item_id}
-                                file_url = upload_result.get("webUrl")
-                                if file_url: img_obj["url"] = file_url
-                                images.append(img_obj)
-                                print(f"[Driver] Attached image {fname} to prompt.")
-                            else:
-                                # Synthesize the annotation but first call unfurl
-                                file_url = upload_result.get("webUrl")
-                                doc_id = upload_result.get("spo_id") or item_id
-                                
-                                # Call unfurl API
-                                unfurl_payload = {
-                                    "EntityRequests": [
-                                        {
-                                            "QueryAnnotations": [
-                                                {
-                                                    "Id": doc_id,
-                                                    "Type": "File",
-                                                    "Text": fname,
-                                                    "AnnotationEntityMetadata": {
-                                                        "SPWebUrl": upload_result.get("tenant_url", "")
-                                                    }
+                            # Synthesize the annotation but first call unfurl
+                            file_url = upload_result.get("webUrl")
+                            doc_id = upload_result.get("spo_id") or item_id
+                            
+                            # Call unfurl API
+                            unfurl_payload = {
+                                "EntityRequests": [
+                                    {
+                                        "QueryAnnotations": [
+                                            {
+                                                "Id": doc_id,
+                                                "Type": "File",
+                                                "Text": fname,
+                                                "AnnotationEntityMetadata": {
+                                                    "SPWebUrl": upload_result.get("tenant_url", "")
                                                 }
-                                            ],
-                                            "PreferredResultSourceFormat": "EntityData",
-                                            "SupportedResultSourceFormats": ["EntityData"]
-                                        }
-                                    ],
-                                    "LogicalId": str(uuid.uuid4()),
-                                    "Cvid": conversation_id,
-                                    "Scenario": {
-                                        "Name": "Harmony.Web.Copilot_Peek",
-                                        "Dimensions": [
-                                            {"DimensionName": "ScenarioDescription", "DimensionValue": "OfficeWebIncludedCopilot.prefetch.getdocumentsummary.fileciq"},
-                                            {"DimensionName": "ScenarioType", "DimensionValue": "PO"}
-                                        ]
-                                    },
-                                    "CacheMode": "FireForget"
-                                }
-                                try:
-                                    headers = {
-                                        "accept": "application/json",
-                                        "content-type": "application/json",
-                                        "origin": "https://m365.cloud.microsoft",
-                                        "referer": "https://m365.cloud.microsoft/",
-                                        "user-agent": CHROME_UA,
-                                        "client-request-id": str(uuid.uuid4()),
-                                        "client-session-id": str(uuid.uuid4())
+                                            }
+                                        ],
+                                        "PreferredResultSourceFormat": "EntityData",
+                                        "SupportedResultSourceFormats": ["EntityData"]
                                     }
-                                    if access_token:
-                                        headers["authorization"] = f"Bearer {access_token}"
+                                ],
+                                "LogicalId": str(uuid.uuid4()),
+                                "Cvid": conversation_id,
+                                "Scenario": {
+                                    "Name": "Harmony.Web.Copilot_Peek",
+                                    "Dimensions": [
+                                        {"DimensionName": "ScenarioDescription", "DimensionValue": "OfficeWebIncludedCopilot.prefetch.getdocumentsummary.fileciq"},
+                                        {"DimensionName": "ScenarioType", "DimensionValue": "PO"}
+                                    ]
+                                },
+                                "CacheMode": "FireForget"
+                            }
+                            try:
+                                headers = {
+                                    "accept": "application/json",
+                                    "content-type": "application/json",
+                                    "origin": "https://m365.cloud.microsoft",
+                                    "referer": "https://m365.cloud.microsoft/",
+                                    "user-agent": CHROME_UA,
+                                    "client-request-id": str(uuid.uuid4()),
+                                    "client-session-id": str(uuid.uuid4())
+                                }
+                                if access_token:
+                                    # Do NOT send authorization header: the access_token is scoped for Sydney/Chathub
+                                    # and sending it to /searchservice causes a 401 error="invalid_token".
+                                    # Substrate unfurl authenticates via cookies.
+                                    # We only use access_token here to extract oid/tid for x-anchormailbox.
+                                    try:
+                                        parts = access_token.split(".")
+                                        if len(parts) >= 2:
+                                            payload_b64 = parts[1]
+                                            payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
+                                            payload_data = json.loads(base64.urlsafe_b64decode(payload_b64.encode()).decode("utf-8", "ignore"))
+                                            oid = payload_data.get("oid")
+                                            tid = payload_data.get("tid")
+                                            if oid and tid:
+                                                headers["x-anchormailbox"] = f"Oid:{oid}@{tid}"
+                                                headers["x-routingparameter-sessionkey"] = f"Oid:{oid}@{tid}"
+                                    except Exception:
+                                        pass
                                         
-                                        # Try to extract oid/tid for x-anchormailbox
-                                        try:
-                                            parts = access_token.split(".")
-                                            if len(parts) >= 2:
-                                                import base64, json
-                                                payload_b64 = parts[1]
-                                                payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
-                                                payload_data = json.loads(base64.urlsafe_b64decode(payload_b64.encode()).decode("utf-8", "ignore"))
-                                                oid = payload_data.get("oid")
-                                                tid = payload_data.get("tid")
-                                                if oid and tid:
-                                                    headers["x-anchormailbox"] = f"Oid:{oid}@{tid}"
-                                                    headers["x-routingparameter-sessionkey"] = f"Oid:{oid}@{tid}"
-                                        except Exception:
-                                            pass
-                                            
-                                    # Add explicit Cookie header to bypass domain filtering
-                                    if cookies:
-                                        if isinstance(cookies, dict):
-                                            headers["cookie"] = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-                                        elif isinstance(cookies, str):
-                                            headers["cookie"] = cookies
+                                # Add explicit Cookie header to bypass domain filtering
+                                cookies = session.cookies.get_dict()
+                                if cookies:
+                                    if isinstance(cookies, dict):
+                                        headers["cookie"] = "; ".join([f"{k}={v}" for k, v in cookies.items()])
+                                    elif isinstance(cookies, str):
+                                        headers["cookie"] = cookies
 
-                                    print(f"[Driver] Unfurl headers being sent: {headers}")
+                                print(f"[Driver] Unfurl headers being sent: {headers}")
 
-                                    # Send unfurl with the exact same session (which has cookies/auth)
-                                    unfurl_resp = session.post(
-                                        "https://substrate.office.com/searchservice/api/v1/unfurl?domain=File",
-                                        headers=headers,
-                                        json=unfurl_payload
-                                    )
-                                    print(f"[Driver] Unfurl response: {unfurl_resp.status_code}")
-                                    if unfurl_resp.status_code != 200:
-                                        print(f"[Driver] Unfurl error: {unfurl_resp.text}")
-                                        print(f"[Driver] Unfurl resp headers: {dict(unfurl_resp.headers)}")
-                                except Exception as e:
-                                    print(f"[Driver] Unfurl request failed: {e}")
+                                # Send unfurl with the exact same session (which has cookies/auth)
+                                unfurl_resp = session.post(
+                                    "https://substrate.office.com/searchservice/api/v1/unfurl?domain=File",
+                                    headers=headers,
+                                    json=unfurl_payload
+                                )
+                                print(f"[Driver] Unfurl response: {unfurl_resp.status_code}")
+                                if unfurl_resp.status_code != 200:
+                                    print(f"[Driver] Unfurl error: {unfurl_resp.text}")
+                                    print(f"[Driver] Unfurl resp headers: {dict(unfurl_resp.headers)}")
+                            except Exception as e:
+                                print(f"[Driver] Unfurl request failed: {e}")
 
-                                message_annotations.append({
-                                    "id": doc_id,
-                                    "text": fname,
-                                    "url": file_url,
-                                    "messageAnnotationType": "File"
-                                })
-                                print(f"[Driver] Attached File annotation for {fname}.")
+                            message_annotations.append({
+                                "id": doc_id,
+                                "text": fname,
+                                "url": file_url,
+                                "messageAnnotationType": "File"
+                            })
+                            print(f"[Driver] Attached File annotation for {fname}.")
                         else:
                             print(f"[Driver] AzureUploader failed for {fname}")
-                else:
-                    # Non-E5 fallback (only supports single image via /attachments)
-                    for att in e5_attachments:
-                        if att["mime_type"].startswith("image/"):
-                            if images:
-                                print(f"[Driver] Warning: Non-E5 endpoint only supports a single image. Dropping additional attachment: {att['file_name']}")
-                                continue
-                            response = session.post(
-                                f"{self.url}/c/api/attachments",
-                                headers={
-                                    "content-type": att["mime_type"],
-                                    "origin": self.url,
-                                    "referer": f"{self.url}/",
-                                    "user-agent": CHROME_UA,
-                                    "accept-language": US_ACCEPT_LANGUAGE,
-                                    "sec-fetch-dest": "empty",
-                                    "sec-fetch-mode": "cors",
-                                    "sec-fetch-site": "same-origin",
-                                    **CHROME_CLIENT_HINTS,
-                                },
-                                data=att["data"],
-                            )
-                            raise_for_status(response)
-                            images.append({"type": "image", "id": str(uuid.uuid4()), "url": response.json().get("url")})
-                        else:
-                            print(f"[Driver] Warning: Non-E5 endpoint does not support non-image attachment: {att['file_name']}")
 
             send_payload = {
                 "event": "send",
@@ -318,276 +342,174 @@ class Copilot(AbstractProvider):
             if resolved_plugins:
                 send_payload["plugins"] = resolved_plugins
 
-            if images or message_annotations:
-                print(f"[Driver] Sending WebSocket payload with attachments: {json.dumps(send_payload, indent=2, ensure_ascii=False)}")
-            send_frame = json.dumps(send_payload).encode()
-
             # -----------------------------------------------------------------
-            # Construct the WebSocket connection URL
+            # Construct the WebSocket connection URL (E5 Business Chat)
             # -----------------------------------------------------------------
-            if "m365.cloud.microsoft" in self.url:
-                # Decode oid and tid from access_token JWT
-                oid = None
-                tid = None
-                if access_token:
-                    try:
-                        parts = access_token.split(".")
-                        if len(parts) >= 2:
-                            payload_b64 = parts[1]
-                            payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
-                            payload_data = json.loads(base64.urlsafe_b64decode(payload_b64.encode()).decode("utf-8", "ignore"))
-                            oid = payload_data.get("oid")
-                            tid = payload_data.get("tid")
-                    except Exception as e:
-                        print(f"[Driver] Failed to decode JWT for oid/tid: {mask_token(e)}")
-                
-                # Fallbacks if decoding fails
-                if not oid or not tid:
-                    raise RuntimeError(
-                        "Failed to decode oid/tid from access token JWT. "
-                        "The token may be malformed or expired. Re-login with `python -m copilot login`."
-                    )
-                    
-                session_id = str(uuid.uuid4())
-                client_req_id = str(uuid.uuid4())
-                
-                websocket_url = (
-                    f"wss://substrate.svc.cloud.microsoft/m365Copilot/Chathub/{oid}@{tid}"
-                    f"?chatsessionid={client_req_id}"
-                    f"&XRoutingParameterSessionKey={client_req_id}"
-                    f"&clientrequestid={client_req_id}"
-                    f"&X-SessionId={session_id}"
-                    f"&ConversationId={conversation_id}"
+            # Decode oid and tid from access_token JWT
+            oid = None
+            tid = None
+            if access_token:
+                try:
+                    parts = access_token.split(".")
+                    if len(parts) >= 2:
+                        payload_b64 = parts[1]
+                        payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
+                        payload_data = json.loads(base64.urlsafe_b64decode(payload_b64.encode()).decode("utf-8", "ignore"))
+                        oid = payload_data.get("oid")
+                        tid = payload_data.get("tid")
+                except Exception as e:
+                    print(f"[Driver] Failed to decode JWT for oid/tid: {mask_token(e)}")
+            
+            # Fallbacks if decoding fails
+            if not oid or not tid:
+                raise RuntimeError(
+                    "Failed to decode oid/tid from access token JWT. "
+                    "The token may be malformed or expired. Re-login with `python -m copilot login`."
                 )
-                if access_token:
-                    websocket_url += f"&access_token={quote(access_token)}"
                 
-                # Append standard E5 features / variants
-                websocket_url += (
-                    "&variants=EnableMcpServerWidgets,feature.EnableMcpServerWidgets,"
-                    "feature.EnableImageGenInsufficientTokensThrottled,feature.EnableImageGenSystemCapacityThrottled,"
-                    "feature.EnableLuForChatCIQ,feature.enableChatCIQPlugin,EnableRequestPlugins,"
-                    "feature.EnableSensitivityLabels,EnableUnsupportedUrlDetector,feature.IsCustomEngineCopilotEnabled,"
-                    "feature.bizchatfluxv3,feature.enablechatpages,feature.enableCodeCanvas,"
-                    "feature.turnOnWorkTabRecommendation,feature.turnOnDARecommendation,"
-                    "feature.IsStreamingModeInChatRequestEnabled,IncludeSourceAttributionsConcise,"
-                    "SkipPublishEmptyMessage,feature.EnableDeduplicatingSourceAttributions,"
-                    "feature.IsCitationsReferencesOutputEnabled,feature.enableDeltaStreamingForReferences,"
-                    "feature.enableIncludeReferencesInDeltaResponse,feature.enablereferencesforagents,"
-                    "Enable3PActionProgressMessages,feature.enableClientWebRtc,"
-                    "feature.EnableMeetingRecapOfSeriesMeetingWithCiq,feature.EnableReferencesListCompleteSignal,"
-                    "feature.StorageMessageSplitDisabled,feature.EnableCuaTakeControlApi,SingletonEnvOn,"
-                    "agt_bizchat_enablePagesCitations,agt_module_canvasSetup_enablePagesCitations,"
-                    "agt_bizchat_enablePagesCitationsForMultiturn,agt_module_canvasSetup_enablePagesCitationsForMultiturn,"
-                    "cdxenablefccinmainline,EnableComposeWidget,feature.cwcallowedos,feature.EnableMergingPureDeltas,"
-                    "feature.disabledisallowedmsgs,feature.enableCitationsForSynthesisData,feature.EnableConversationShareApis,"
-                    "feature.enableGenerateGraphicArtOptionsSet,cdximagen,feature.EnableUpdatedUXForConfirmationDialog,"
-                    "feature.EnableContentApiandDocTypeHtmlInRichAnswers,"
-                    "cdxgrounding_api_v2_rich_web_answers_reference_bottom_force,cdxenablerenderforisocomp,"
-                    "feature.EnableClientFileURLSupportForOfficeWebPaidCopilot,feature.EnableDesignEditorImageGrounding,"
-                    "feature.EnableDesignerEditor,feature.EnableSkipRehydrationForSpeCIdImages,feature.EnablePersonalization,"
-                    "rich_responses,feature.EnableBase64DataInMessageAnnotations,feature.EnableSkipEmittingMessageOnFlush,"
-                    "feature.EnableRemoveEmptySourceAttributions,feature.EnableRemoveStreamingMode,"
-                    "feature.OfficeWebToHelix,feature.OfficeDesktopToHelix,feature.M365TeamsHubToHelix,"
-                    "feature.OwaHubToHelix,feature.MonarchHubToHelix,feature.Win32OutlookHubToHelix,"
-                    "feature.MacOutlookHubToHelix,Agt_bizchat_enableGpt5ForHelix"
-                    "&source=%22officeweb%22"
-                    "&product=Office"
-                    "&agentHost=Bizchat.FullScreen"
-                    "&licenseType=Starter"
-                    "&isEdu=false"
-                    "&agent=web"
-                    "&scenario=OfficeWebIncludedCopilot"
-                )
-            else:
-                websocket_url = f"{self.websocket_url}&clientSessionId={uuid.uuid4()}"
-                if access_token:
-                    websocket_url = f"{websocket_url}&accessToken={quote(access_token)}"
-                    if identity_type:
-                        websocket_url = f"{websocket_url}&X-UserIdentityType={quote(identity_type)}"
+            session_id = str(uuid.uuid4())
+            client_req_id = str(uuid.uuid4())
+            
+            websocket_url = (
+                f"wss://substrate.svc.cloud.microsoft/m365Copilot/Chathub/{oid}@{tid}"
+                f"?chatsessionid={client_req_id}"
+                f"&XRoutingParameterSessionKey={client_req_id}"
+                f"&clientrequestid={client_req_id}"
+                f"&X-SessionId={session_id}"
+                f"&ConversationId={conversation_id}"
+            )
+            if access_token:
+                websocket_url += f"&access_token={quote(access_token)}"
+            
+            # Append standard E5 features / variants
+            websocket_url += (
+                "&variants=EnableMcpServerWidgets,feature.EnableMcpServerWidgets,"
+                "feature.EnableImageGenInsufficientTokensThrottled,feature.EnableImageGenSystemCapacityThrottled,"
+                "feature.EnableLuForChatCIQ,feature.enableChatCIQPlugin,EnableRequestPlugins,"
+                "feature.EnableSensitivityLabels,EnableUnsupportedUrlDetector,feature.IsCustomEngineCopilotEnabled,"
+                "feature.bizchatfluxv3,feature.enablechatpages,feature.enableCodeCanvas,"
+                "feature.turnOnWorkTabRecommendation,feature.turnOnDARecommendation,"
+                "feature.IsStreamingModeInChatRequestEnabled,IncludeSourceAttributionsConcise,"
+                "SkipPublishEmptyMessage,feature.EnableDeduplicatingSourceAttributions,"
+                "feature.IsCitationsReferencesOutputEnabled,feature.enableDeltaStreamingForReferences,"
+                "feature.enableIncludeReferencesInDeltaResponse,feature.enablereferencesforagents,"
+                "Enable3PActionProgressMessages,feature.enableClientWebRtc,"
+                "feature.EnableMeetingRecapOfSeriesMeetingWithCiq,feature.EnableReferencesListCompleteSignal,"
+                "feature.StorageMessageSplitDisabled,feature.EnableCuaTakeControlApi,SingletonEnvOn,"
+                "agt_bizchat_enablePagesCitations,agt_module_canvasSetup_enablePagesCitations,"
+                "agt_bizchat_enablePagesCitationsForMultiturn,agt_module_canvasSetup_enablePagesCitationsForMultiturn,"
+                "cdxenablefccinmainline,EnableComposeWidget,feature.cwcallowedos,feature.EnableMergingPureDeltas,"
+                "feature.disabledisallowedmsgs,feature.enableCitationsForSynthesisData,feature.EnableConversationShareApis,"
+                "feature.enableGenerateGraphicArtOptionsSet,cdximagen,feature.EnableUpdatedUXForConfirmationDialog,"
+                "feature.EnableContentApiandDocTypeHtmlInRichAnswers,"
+                "cdxgrounding_api_v2_rich_web_answers_reference_bottom_force,cdxenablerenderforisocomp,"
+                "feature.EnableClientFileURLSupportForOfficeWebPaidCopilot,feature.EnableDesignEditorImageGrounding,"
+                "feature.EnableDesignerEditor,feature.EnableSkipRehydrationForSpeCIdImages,feature.EnablePersonalization,"
+                "rich_responses,feature.EnableBase64DataInMessageAnnotations,feature.EnableSkipEmittingMessageOnFlush,"
+                "feature.EnableRemoveEmptySourceAttributions,feature.EnableRemoveStreamingMode,"
+                "feature.OfficeWebToHelix,feature.OfficeDesktopToHelix,feature.M365TeamsHubToHelix,"
+                "feature.OwaHubToHelix,feature.MonarchHubToHelix,feature.Win32OutlookHubToHelix,"
+                "feature.MacOutlookHubToHelix,Agt_bizchat_enableGpt5ForHelix"
+                "&source=%22officeweb%22"
+                "&product=Office"
+                "&agentHost=Bizchat.FullScreen"
+                "&licenseType=Starter"
+                "&isEdu=false"
+                "&agent=web"
+                "&scenario=OfficeWebIncludedCopilot"
+            )
 
             print("[Driver] Connecting to WebSocket...")
 
             wss = session.ws_connect(websocket_url)
             print("[Driver] WebSocket connected successfully.")
             try:
-                if "m365.cloud.microsoft" in self.url:
-                    # E5 Business Chat uses ASP.NET Core SignalR protocol
-                    wss.send('{"protocol":"json","version":1}\x1e'.encode("utf-8"), CurlWsFlag.TEXT)
-                    wss.send('{"type":6}\x1e'.encode("utf-8"), CurlWsFlag.TEXT)
-                    
-                    # Build E5 SignalR StreamInvocation frame
-                    e5_payload = {
-                        "arguments": [
-                            {
-                                "source": "officeweb",
-                                "clientCorrelationId": str(uuid.uuid4()),
-                                "sessionId": str(uuid.uuid4()),
-                                "optionsSets": resolved_options_sets or [
-                                    "search_result_progress_messages_with_search_queries",
-                                    "update_textdoc_response_after_streaming",
-                                    "cwc_flux_image",
-                                    "cwc_code_interpreter",
-                                    "cwc_flux_v3",
-                                    "rich_responses",
-                                    "pages_citations",
-                                    "pages_citations_multiturn",
-                                ],
-                                "streamingMode": "ConciseWithPadding",
-                                "allowedMessageTypes": [
-                                    "Chat", "Suggestion", "Progress", "GeneratedCode",
-                                    "RenderCardRequest", "GenerateContentQuery",
-                                    "GenerateGraphicArt", "SearchQuery", "ConfirmationCard",
-                                    "AuthError", "DeveloperLogs", "TriggerPlugin",
-                                    "HintInvocation", "MemoryUpdate", "EndOfRequest",
-                                    "TriggerConfirmation", "ReferencesListComplete",
-                                ],
-                                "traceId": str(uuid.uuid4()),
-                                "isStartOfSession": True,
-                                "clientInfo": {
-                                    "clientPlatform": "mcmcopilot-web",
-                                    "clientAppName": "Office",
-                                    "clientEntrypoint": "mcmcopilot-officeweb",
-                                    "clientSessionId": str(uuid.uuid4()),
-                                    "ProductCategory": "Chat",
-                                    "clientAppType": "Web",
-                                    "productEntryPoint": "ChatPanel",
-                                    "deviceOS": "Windows",
-                                    "deviceType": "Desktop",
-                                    "clientPlatformVersion": "10",
-                                },
-                                "message": {
-                                    "author": "user",
-                                    "inputMethod": "Keyboard",
-                                    "text": prompt,
-                                    "entityAnnotationTypes": ["People", "File", "Event", "Email", "TeamsMessage"],
-                                    "requestId": str(uuid.uuid4()),
-                                    "locale": "zh-cn",
-                                    "messageType": "Chat",
-                                    "experienceType": "Default",
-                                    "messageAnnotations": ([
-                                        {
-                                            "id": img.get("id", str(uuid.uuid4())),
-                                            "messageAnnotationMetadata": {
-                                                "@type": "File",
-                                                "annotationType": "File",
-                                                "fileType": "jpg",
-                                                "fileName": "image.jpg",
-                                                "url": img.get("url", "")
-                                            },
-                                            "messageAnnotationType": "ImageFile"
-                                        } for img in images
-                                    ] if images else []) + (message_annotations if message_annotations else []),
-                                },
-                                "plugins": resolved_plugins or [{"Id": "BingWebSearch", "Source": "BuiltIn"}],
-                                "isSbsSupported": True,
-                                "tone": resolved_mode or "Gpt_5_5_Reasoning",
-                                "renderReferencesBehindEOS": True,
-                                "disconnectBehavior": "continue",
-                            }
-                        ],
-                        "invocationId": "0",
-                        "target": "chat",
-                        "type": 4,
-                    }
-                    if resolved_gpt_id:
-                        e5_payload["arguments"][0]["threadLevelGptId"] = {"gptId": resolved_gpt_id}
-                    wss.send((json.dumps(e5_payload) + "\x1e").encode("utf-8"), CurlWsFlag.TEXT)
-                    yield from self._read_e5_stream(wss, timeout)
-                else:
-                    # Initialise the session before sending: setOptions then
-                    # reportLocalConsents. A `send` issued first is rejected with
-                    # `invalid-event` (see the handshake constants above).
-                    options_frame = SET_OPTIONS_FRAME.copy()
-                    if resolved_options_sets:
-                        options_frame["optionsSets"] = resolved_options_sets
-                    if resolved_plugins:
-                        options_frame["plugins"] = resolved_plugins
-                    wss.send(json.dumps(options_frame).encode(), CurlWsFlag.TEXT)
-                    wss.send(json.dumps(CONSENTS_FRAME).encode(), CurlWsFlag.TEXT)
-                    wss.send(send_frame, CurlWsFlag.TEXT)
-                    yield from self._read_stream(wss, send_frame, timeout)
+                # E5 Business Chat uses ASP.NET Core SignalR protocol
+                wss.send('{"protocol":"json","version":1}\x1e'.encode("utf-8"), CurlWsFlag.TEXT)
+                wss.send('{"type":6}\x1e'.encode("utf-8"), CurlWsFlag.TEXT)
+                
+                # Build E5 SignalR StreamInvocation frame
+                e5_payload = {
+                    "arguments": [
+                        {
+                            "source": "officeweb",
+                            "clientCorrelationId": str(uuid.uuid4()),
+                            "sessionId": str(uuid.uuid4()),
+                            "optionsSets": resolved_options_sets or [
+                                "stream_switch_to_thread_level_gpt_id",
+                                "cwc_code_interpreter",
+                                "cwc_flux_v3",
+                                "rich_responses",
+                                "pages_citations",
+                                "pages_citations_multiturn",
+                            ],
+                            "streamingMode": "ConciseWithPadding",
+                            "allowedMessageTypes": [
+                                "Chat", "Suggestion", "Progress", "GeneratedCode",
+                                "RenderCardRequest", "GenerateContentQuery",
+                                "GenerateGraphicArt", "SearchQuery", "ConfirmationCard",
+                                "AuthError", "DeveloperLogs", "TriggerPlugin",
+                                "HintInvocation", "MemoryUpdate", "EndOfRequest",
+                                "TriggerConfirmation", "ReferencesListComplete",
+                            ],
+                            "traceId": str(uuid.uuid4()),
+                            "isStartOfSession": True,
+                            "clientInfo": {
+                                "clientPlatform": "mcmcopilot-web",
+                                "clientAppName": "Office",
+                                "clientEntrypoint": "mcmcopilot-officeweb",
+                                "clientSessionId": str(uuid.uuid4()),
+                                "ProductCategory": "Chat",
+                                "clientAppType": "Web",
+                                "productEntryPoint": "ChatPanel",
+                                "deviceOS": "Windows",
+                                "deviceType": "Desktop",
+                                "clientPlatformVersion": "10",
+                            },
+                            "message": {
+                                "author": "user",
+                                "inputMethod": "Keyboard",
+                                "text": prompt,
+                                "entityAnnotationTypes": ["People", "File", "Event", "Email", "TeamsMessage"],
+                                "requestId": str(uuid.uuid4()),
+                                "locale": "zh-cn",
+                                "messageType": "Chat",
+                                "experienceType": "Default",
+                                "messageAnnotations": ([
+                                    {
+                                        "id": img.get("id", str(uuid.uuid4())),
+                                        "messageAnnotationMetadata": {
+                                            "@type": "File",
+                                            "annotationType": "File",
+                                            "fileType": "jpg",
+                                            "fileName": "image.jpg",
+                                            "url": img.get("url", "")
+                                        },
+                                        "messageAnnotationType": "ImageFile"
+                                    } for img in images
+                                ] if images else []) + (message_annotations if message_annotations else []),
+                            },
+                            "plugins": resolved_plugins or [{"Id": "BingWebSearch", "Source": "BuiltIn"}],
+                            "isSbsSupported": True,
+                            "tone": resolved_mode or "Gpt_5_5_Reasoning",
+                            "renderReferencesBehindEOS": True,
+                            "disconnectBehavior": "continue",
+                        }
+                    ],
+                    "invocationId": "0",
+                    "target": "chat",
+                    "type": 4,
+                }
+                if resolved_gpt_id:
+                    e5_payload["arguments"][0]["threadLevelGptId"] = {"gptId": resolved_gpt_id}
+                wss.send((json.dumps(e5_payload) + "\x1e").encode("utf-8"), CurlWsFlag.TEXT)
+                yield from self._read_e5_stream(wss, timeout)
             finally:
                 try:
                     wss.close()
                 except Exception:
                     pass
 
-    def _read_stream(self, wss, send_frame: bytes, timeout: int, idle_timeout: int = 60):
-        """Consume chat-socket frames, solving challenges, yielding text/images.
-
-        ``idle_timeout`` bounds how long we wait for the *next* frame: the chat
-        backend normally answers within a second, so prolonged silence means a
-        stalled socket (or a challenge we failed to answer) — we raise rather
-        than block for the full ``timeout``.
-        """
-        buffer = b""
-        is_started = False
-        answered = False
-        image_prompt = None
-        last_msg = None
-
-        overall_deadline = time.time() + timeout
-        while True:
-            idle_deadline = time.time() + idle_timeout
-            try:
-                chunk = self._recv_frame(wss, min(overall_deadline, idle_deadline))
-            except Exception:
-                break  # socket closed/errored -> end of stream
-            if chunk is None:  # deadline passed with no frame
-                if time.time() >= overall_deadline:
-                    raise TimeoutError(f"Copilot stream exceeded {timeout}s")
-                raise TimeoutError(
-                    f"Copilot chat socket went silent for {idle_timeout}s; "
-                    f"last frame was {last_msg!r}."
-                )
-
-            buffer += chunk if isinstance(chunk, (bytes, bytearray)) else chunk.encode()
-            messages, buffer = drain_json(buffer)
-            for msg in messages:
-                last_msg = msg
-                event = msg.get("event")
-                if event == "challenge":
-                    method = msg.get("method")
-                    if answered:
-                        continue  # already answered the PoW for this turn; ignore echo
-                    token = self._solve_challenge(msg)
-                    if token is None:
-                        raise RuntimeError(
-                            f"Unsolvable Copilot challenge (method={method!r}). "
-                            "Please re-login or check session credentials."
-                        )
-                    wss.send(json.dumps({
-                        "event": "challengeResponse",
-                        "token": token,
-                        "method": msg.get("method"),
-                        "id": msg.get("id"),
-                    }).encode(), CurlWsFlag.TEXT)
-                    answered = True
-                    # The client re-sends the held message after a challenge.
-                    wss.send(send_frame, CurlWsFlag.TEXT)
-                elif event == "appendText":
-                    is_started = True
-                    yield msg.get("text")
-                elif event == "generatingImage":
-                    image_prompt = msg.get("prompt")
-                elif event == "imageGenerated":
-                    yield ImageResponse(msg.get("url"), image_prompt, {"preview": msg.get("thumbnailUrl")})
-                elif event == "done":
-                    return
-                elif event == "error":
-                    code = msg.get("errorCode") or msg
-                    if code == "chat-service-unavailable":
-                        raise RuntimeError(
-                            "Copilot error: chat-service-unavailable. The chat backend is "
-                            "typically geo-restricted; if you are outside a supported region, "
-                            "retry via a proxy in a supported region, e.g. "
-                            "create_completion(..., proxy='http://user:pass@host:port')."
-                        )
-                    raise RuntimeError(f"Copilot error: {code}")
-
-        if not is_started:
-            raise RuntimeError(f"Invalid response: {last_msg}")
 
     def _read_e5_stream(self, wss, timeout: int, idle_timeout: int = 60):
         """Consume E5 SignalR chat-socket frames, yielding streamed text chunks."""

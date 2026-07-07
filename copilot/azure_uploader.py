@@ -46,6 +46,8 @@ class AzureConfigManager:
         return app_config, upn
 
 class AzureUploader:
+    _msal_apps: Dict[str, msal.ConfidentialClientApplication] = {}
+
     @classmethod
     def upload_file(cls, session_name: str, file_name: str, file_content: bytes, mime_type: str = "application/octet-stream") -> Optional[Dict]:
         """
@@ -66,13 +68,15 @@ class AzureUploader:
             print(f"[AzureUploader] Incomplete Azure credentials for session '{session_name}'.")
             return None
 
-        # 1. Get Access Token via MSAL
+        # 1. Get Access Token via MSAL (with instance caching)
         authority = f"https://login.microsoftonline.com/{tenant_id}"
-        app = msal.ConfidentialClientApplication(
-            client_id,
-            authority=authority,
-            client_credential=client_secret,
-        )
+        if client_id not in cls._msal_apps:
+            cls._msal_apps[client_id] = msal.ConfidentialClientApplication(
+                client_id,
+                authority=authority,
+                client_credential=client_secret,
+            )
+        app = cls._msal_apps[client_id]
         
         scopes = ["https://graph.microsoft.com/.default"]
         result = app.acquire_token_silent(scopes, account=None)
@@ -118,31 +122,47 @@ class AzureUploader:
             
             uploaded_item = None
             
-            for i in range(0, total_size, chunk_size):
-                chunk = file_content[i:i + chunk_size]
-                start = i
-                end = i + len(chunk) - 1
-                
-                chunk_headers = {
-                    "Content-Length": str(len(chunk)),
-                    "Content-Range": f"bytes {start}-{end}/{total_size}"
-                }
-                
-                chunk_resp = requests.put(upload_url, headers=chunk_headers, data=chunk)
-                
-                # HTTP 202 Accepted indicates chunk was uploaded but more remain
-                # HTTP 201 Created or 200 OK indicates completion and returns the item
-                if chunk_resp.status_code in (200, 201):
-                    uploaded_item = chunk_resp.json()
-                    break
-                elif chunk_resp.status_code == 202:
-                    continue
-                else:
-                    print(f"[AzureUploader] Chunk upload failed with status {chunk_resp.status_code}: {chunk_resp.text}")
-                    return None
+            try:
+                for i in range(0, total_size, chunk_size):
+                    chunk = file_content[i:i + chunk_size]
+                    start = i
+                    end = i + len(chunk) - 1
+                    
+                    chunk_headers = {
+                        "Content-Length": str(len(chunk)),
+                        "Content-Range": f"bytes {start}-{end}/{total_size}"
+                    }
+                    
+                    chunk_resp = requests.put(upload_url, headers=chunk_headers, data=chunk)
+                    
+                    # HTTP 202 Accepted indicates chunk was uploaded but more remain
+                    # HTTP 201 Created or 200 OK indicates completion and returns the item
+                    if chunk_resp.status_code in (200, 201):
+                        uploaded_item = chunk_resp.json()
+                        break
+                    elif chunk_resp.status_code == 202:
+                        continue
+                    else:
+                        print(f"[AzureUploader] Chunk upload failed with status {chunk_resp.status_code}: {chunk_resp.text}")
+                        try:
+                            requests.delete(upload_url)
+                        except Exception:
+                            pass
+                        return None
+            except Exception as e_chunk:
+                print(f"[AzureUploader] Exception during chunk upload: {e_chunk}")
+                try:
+                    requests.delete(upload_url)
+                except Exception:
+                    pass
+                return None
                     
             if not uploaded_item:
                 print("[AzureUploader] Upload completed but no item data returned.")
+                try:
+                    requests.delete(upload_url)
+                except Exception:
+                    pass
                 return None
                 
             drive_id = uploaded_item.get('parentReference', {}).get('driveId', '')

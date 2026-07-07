@@ -257,6 +257,22 @@
     </div>
 
     <script>
+        function escapeHtml(str) {
+            if (!str) return '';
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+        }
+
+        async function getSecureAuthToken() {
+            const pwd = localStorage.getItem('admin_pwd') || '';
+            if (!pwd) return '';
+            const ts = Date.now().toString();
+            const encoder = new TextEncoder();
+            const data = encoder.encode(ts + ":" + pwd);
+            const buffer = await crypto.subtle.digest('SHA-256', data);
+            const hex = Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+            return `${ts}.${hex}`;
+        }
+
         // Override global fetch to always inject X-Admin-Auth header and handle 401s
         const originalFetch = window.fetch;
         window.fetch = async function () {
@@ -272,7 +288,7 @@
                     localStorage.removeItem('admin_pwd_exp');
                 }
 
-                config.headers['X-Admin-Auth'] = localStorage.getItem('admin_pwd') || '';
+                config.headers['X-Admin-Auth'] = await getSecureAuthToken();
 
                 let response = await originalFetch(resource, config);
                 if (response.status === 401) {
@@ -407,9 +423,9 @@
             let vncUrl = cfg.vnc_url;
             if (!vncUrl) {
                 // Default to the embedded FastAPI noVNC proxy
-                const adminPwd = localStorage.getItem('admin_pwd') || '';
-                document.cookie = `admin_pwd=${encodeURIComponent(adminPwd)}; path=/; SameSite=Strict`;
-                const wsPath = encodeURIComponent(`vnc-ws?token=${encodeURIComponent(adminPwd)}`);
+                const authToken = await getSecureAuthToken();
+                document.cookie = `admin_pwd=${encodeURIComponent(authToken)}; path=/; SameSite=Strict`;
+                const wsPath = encodeURIComponent(`vnc-ws?token=${encodeURIComponent(authToken)}`);
                 vncUrl = `/novnc/vnc.html?autoconnect=true&path=${wsPath}`;
             }
 
@@ -433,8 +449,8 @@
                 appsContainer.innerHTML = '';
                 for (const [name, info] of Object.entries(appsData.azure_apps || {})) {
                     appsContainer.innerHTML += `<div class="api-key-block">
-                        <strong>${name}</strong><br>
-                        <span style="font-size:12px; color:#666;">Tenant: ${info.tenant_id}</span>
+                        <strong>${escapeHtml(name)}</strong><br>
+                        <span style="font-size:12px; color:#666;">Tenant: ${escapeHtml(info.tenant_id)}</span>
                     </div>`;
                 }
 
@@ -442,8 +458,8 @@
                 mapContainer.innerHTML = '';
                 for (const [session, info] of Object.entries(mapData.session_mappings || {})) {
                     mapContainer.innerHTML += `<div class="api-key-block">
-                        <strong>${session}</strong> -> <span style="color:#2563eb;">${info.azure_name}</span><br>
-                        <span style="font-size:12px; color:#666;">UPN: ${info.upn}</span>
+                        <strong>${escapeHtml(session)}</strong> -> <span style="color:#2563eb;">${escapeHtml(info.azure_name)}</span><br>
+                        <span style="font-size:12px; color:#666;">UPN: ${escapeHtml(info.upn)}</span>
                     </div>`;
                 }
             } catch (e) {

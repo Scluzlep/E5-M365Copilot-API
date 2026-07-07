@@ -191,10 +191,11 @@ def get_ext_for_mime(mime: str) -> str:
     return ext if ext else '.txt'
 
 def extract_files(messages: List[ChatMessage], last_turn_only: bool = False) -> List[dict]:
-    if last_turn_only and messages:
+    if last_turn_only:
         target_messages = []
         for m in reversed(messages):
-            if m.role == "user":
+            role = getattr(m, "role", None) or (m.get("role") if isinstance(m, dict) else None)
+            if role == "user":
                 target_messages.append(m)
             else:
                 break
@@ -202,20 +203,34 @@ def extract_files(messages: List[ChatMessage], last_turn_only: bool = False) -> 
     else:
         target_messages = messages
 
+    total_attachment_parts = 0
+    for m in target_messages:
+        content = getattr(m, "content", None) or (m.get("content") if isinstance(m, dict) else None)
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") in ("image_url", "file_url", "image", "document", "file"):
+                    total_attachment_parts += 1
+    if total_attachment_parts > 3:
+        raise ValueError("每轮对话最多允许上传3个附件。")
+
     files = []
     for m in target_messages:
-        if not isinstance(m.content, list):
+        content = getattr(m, "content", None) or (m.get("content") if isinstance(m, dict) else None)
+        if not isinstance(content, list):
             continue
-        for part in m.content:
+        for part in content:
             if not isinstance(part, dict):
                 continue
+            
+            if part.get("type") in ("image_url", "file_url", "image", "document", "file") and len(files) >= 3:
+                raise ValueError("每轮对话最多允许上传3个附件。")
             
             b64_data = None
             mime_type = ""
             file_name = None
             
-            if part.get("type") == "image_url":
-                url_obj = part.get("image_url", {})
+            if part.get("type") in ("image_url", "file_url"):
+                url_obj = part.get("image_url") or part.get("file_url") or {}
                 url = url_obj.get("url", "")
                 if url.startswith("data:"):
                     try:
@@ -225,7 +240,7 @@ def extract_files(messages: List[ChatMessage], last_turn_only: bool = False) -> 
                         continue
                 elif url.startswith("http://") or url.startswith("https://"):
                     if len(files) >= 3:
-                        raise ValueError("At most 3 files can be uploaded per turn.")
+                        raise ValueError("每轮对话最多允许上传3个附件。")
                     res = image_cache.get_or_fetch(url)
                     if res:
                         mime_type, data_bytes = res
@@ -242,11 +257,12 @@ def extract_files(messages: List[ChatMessage], last_turn_only: bool = False) -> 
                 if source.get("type") == "base64":
                     b64_data = source.get("data")
                     mime_type = source.get("media_type", "")
-                elif source.get("type") in ("url", "http", "https") or source.get("url"):
-                    url = source.get("url") or source.get("data", "")
+                elif source.get("type") in ("url", "http", "https") or source.get("url") or part.get("url") or part.get("file_url"):
+                    url = source.get("url") or source.get("data") or part.get("url")
+                    if isinstance(url, dict): url = url.get("url", "")
                     if isinstance(url, str) and (url.startswith("http://") or url.startswith("https://")):
                         if len(files) >= 3:
-                            raise ValueError("At most 3 files can be uploaded per turn.")
+                            raise ValueError("每轮对话最多允许上传3个附件。")
                         res = image_cache.get_or_fetch(url)
                         if res:
                             mime_type, data_bytes = res
@@ -261,17 +277,16 @@ def extract_files(messages: List[ChatMessage], last_turn_only: bool = False) -> 
             
             if b64_data:
                 if len(files) >= 3:
-                    raise ValueError("At most 3 files can be uploaded per turn.")
+                    raise ValueError("每轮对话最多允许上传3个附件。")
                 try:
                     data_bytes = base64.b64decode(b64_data)
                 except Exception:
                     continue
                 
                 ext = ""
-                if "name" in part:
-                    file_name = part["name"]
-                    if "." in file_name:
-                        ext = "." + file_name.split(".")[-1].lower()
+                file_name = part.get("name") or part.get("title") or part.get("filename")
+                if file_name and "." in file_name:
+                    ext = "." + file_name.split(".")[-1].lower()
                         
                 if (not mime_type or mime_type.lower() == 'application/octet-stream') and file_name:
                     guessed = mimetypes.guess_type(file_name)[0]
@@ -308,7 +323,7 @@ def extract_files(messages: List[ChatMessage], last_turn_only: bool = False) -> 
                 })
                 
     if len(files) > 3:
-        raise ValueError("At most 3 files can be uploaded per turn.")
+        raise ValueError("每轮对话最多允许上传3个附件。")
                 
     return files
 
