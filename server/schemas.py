@@ -28,3 +28,16 @@ class ChatCompletionRequest(BaseModel):
     # Any other OpenAI fields (temperature, max_tokens, ...) are accepted and
     # ignored — Copilot's consumer protocol doesn't expose those knobs.
 
+
+class ClaudeMessage(BaseModel):
+    role: str
+    content: Union[str, List[Any]]
+
+
+class ClaudeMessageRequest(BaseModel):
+    model: str
+    messages: List[ClaudeMessage]
+    system: Optional[Union[str, List[Any]]] = None
+    stream: bool = False
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None

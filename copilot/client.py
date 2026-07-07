@@ -127,7 +127,7 @@ class CopilotClient:
             kw = dict(
                 stream=True,
                 proxy=self._proxy,
-                cookies=auth["cookies"] if auth else None,
+                cookies=auth.get("cookies") if auth else None,
                 access_token=auth["access_token"] if auth else None,
                 identity_type=auth.get("identity_type") if auth else None,
                 model=model,

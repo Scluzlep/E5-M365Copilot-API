@@ -17,8 +17,19 @@ from .openai_format import (
     stream_chunk,
 )
 from .prompt import messages_to_prompt
-from .schemas import ChatCompletionRequest
+from .schemas import ChatCompletionRequest, ClaudeMessageRequest
 from .router import router
+from .claude_format import (
+    message_response,
+    new_msg_id,
+    stream_message_start,
+    stream_content_block_start,
+    stream_content_block_delta,
+    stream_content_block_stop,
+    stream_message_delta,
+    stream_message_stop,
+    sse_event as claude_sse_event
+)
 
 app = FastAPI(title="Copilot OpenAI-compatible API", version="1.0.0")
 security = HTTPBearer(auto_error=False)
@@ -135,8 +146,9 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
     # This allows auth errors to propagate up before any SSE events are sent, enabling seamless session fallback.
     stream = session.client.stream(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
     
+    stream_iter = iter(stream)
     try:
-        first_item = next(stream)
+        first_item = next(stream_iter)
     except StopIteration:
         first_item = None
         
@@ -170,7 +182,7 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
             res = process_piece(first_item)
             if res: yield res
 
-        for piece in stream:
+        for piece in stream_iter:
             res = process_piece(piece)
             if res: yield res
         
@@ -213,6 +225,93 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
             stream_chunk(cid, created, model, {"content": "\n[error: upstream request failed]"}, finish="error")
         )
     yield "data: [DONE]\n\n"
+
+
+def _stream_claude(session, prompt: str, model: str, messages: list, plugins=None):
+    """Yield Anthropic Claude SSE events for ``prompt``."""
+    msg_id = new_msg_id()
+    
+    stream = session.client.stream(prompt, conversation_id=None, model=model, plugins=plugins)
+    
+    stream_iter = iter(stream)
+    try:
+        first_item = next(stream_iter)
+    except StopIteration:
+        first_item = None
+
+    yield stream_message_start(msg_id, model)
+    yield stream_content_block_start(index=0)
+    
+    try:
+        final_text = ""
+        final_thought = ""
+        cleaner = StreamCleaner()
+        in_thought = False
+        
+        def process_piece(piece):
+            nonlocal final_text, final_thought, in_thought
+            res = []
+            if isinstance(piece, str) and piece:
+                if in_thought:
+                    res.append(stream_content_block_delta(index=0, text="\n</thinking>\n\n"))
+                    in_thought = False
+                cleaned_piece = cleaner.process(piece)
+                final_text += cleaned_piece
+                if cleaned_piece:
+                    res.append(stream_content_block_delta(index=0, text=cleaned_piece))
+            elif isinstance(piece, dict):
+                if "thought" in piece:
+                    if not in_thought:
+                        res.append(stream_content_block_delta(index=0, text="<thinking>\n"))
+                        in_thought = True
+                    final_thought += piece["thought"]
+                    res.append(stream_content_block_delta(index=0, text=piece["thought"]))
+                elif "citations" in piece:
+                    cleaner.add_citations(piece["citations"])
+            elif isinstance(piece, ImageResponse) and piece.url:
+                if in_thought:
+                    res.append(stream_content_block_delta(index=0, text="\n</thinking>\n\n"))
+                    in_thought = False
+                markdown_img = f"\n\n![Generated Image]({piece.url})\n\n"
+                final_text += markdown_img
+                res.append(stream_content_block_delta(index=0, text=markdown_img))
+            return res
+
+        if first_item:
+            for r in process_piece(first_item): yield r
+
+        for piece in stream_iter:
+            for r in process_piece(piece): yield r
+            
+        flushed = cleaner.flush()
+        if flushed:
+            if in_thought:
+                yield stream_content_block_delta(index=0, text="\n</thinking>\n\n")
+                in_thought = False
+            final_text += flushed
+            yield stream_content_block_delta(index=0, text=flushed)
+            
+        if in_thought:
+            yield stream_content_block_delta(index=0, text="\n</thinking>\n")
+
+        yield stream_content_block_stop(index=0)
+        yield stream_message_delta(stop_reason="end_turn")
+        yield stream_message_stop()
+        
+    except RateLimitExceeded as exc:
+        secs = max(1, round(exc.wait_seconds))
+        yield stream_content_block_delta(index=0, text=f"\n[error: rate limit exceeded, retry in {secs}s]")
+        yield stream_content_block_stop(index=0)
+        yield stream_message_delta(stop_reason="error")
+        yield stream_message_stop()
+    except Exception as exc:
+        import traceback, sys
+        print(f"[stream error] {traceback.format_exc()}", file=sys.stderr)
+        yield stream_content_block_delta(index=0, text="\n[error: upstream request failed]")
+        yield stream_content_block_stop(index=0)
+        yield stream_message_delta(stop_reason="error")
+        yield stream_message_stop()
+
 
 
 @app.get("/v1/models")
@@ -344,6 +443,87 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
             status_code=502,
             content={"error": {"message": "upstream request failed", "type": "upstream_error"}},
         )
+
+
+@app.post("/v1/messages")
+def claude_messages(req: ClaudeMessageRequest, creds: HTTPAuthorizationCredentials = Depends(security)):
+    api_key = creds.credentials if creds else "sk-default"
+    
+    from .schemas import ChatMessage
+    standard_messages = []
+    if req.system:
+        sys_text = req.system if isinstance(req.system, str) else "".join(b.get("text", "") for b in req.system if isinstance(b, dict))
+        standard_messages.append(ChatMessage(role="system", content=sys_text))
+        
+    for m in req.messages:
+        content = m.content if isinstance(m.content, str) else "".join(b.get("text", "") for b in m.content if isinstance(b, dict))
+        standard_messages.append(ChatMessage(role=m.role, content=content))
+        
+    try:
+        _, prompt, _, preferred_session = router.route(
+            api_key=api_key, 
+            messages=standard_messages, 
+            client_provided_cid=None
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=401, content={"error": {"message": str(e), "type": "authentication_error"}})
+
+    if not prompt.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "no text content", "type": "invalid_request_error"}},
+        )
+        
+    model = req.model or MODEL_NAME
+
+    if req.stream:
+        def stream_wrapper():
+            nonlocal preferred_session
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                        yield from _stream_claude(session, prompt, model, standard_messages, plugins=None)
+                        return
+                except RuntimeError as e:
+                    if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
+                        print(f"[API] Claude session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
+                        session.client.invalidate_auth()
+                        preferred_session = None
+                        if attempt == max_retries - 1:
+                            raise
+                        continue
+                    raise
+
+        return StreamingResponse(
+            stream_wrapper(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+    else:
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                    reply = session.client.chat(prompt, conversation_id=None, model=model, plugins=None)
+                    break
+            except RuntimeError as e:
+                if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
+                    print(f"[API] Claude session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
+                    session.client.invalidate_auth()
+                    preferred_session = None
+                    if attempt == max_retries - 1:
+                        raise
+                    continue
+                raise
+                
+        final_text = reply.text
+        if reply.images:
+            for img in reply.images:
+                if img.url:
+                    final_text += f"\n\n![Generated Image]({img.url})"
+                    
+        return message_response(final_text, model)
 
 
 from fastapi import BackgroundTasks, Depends, HTTPException, status, WebSocket
