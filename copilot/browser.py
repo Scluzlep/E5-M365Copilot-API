@@ -77,7 +77,6 @@ _STEALTH_INIT_JS = (
 _FIND_TOKEN_JS = """
 () => {
   try {
-    let fallback = null;
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       const v = localStorage.getItem(k);
@@ -85,15 +84,15 @@ _FIND_TOKEN_JS = """
         try {
           const o = JSON.parse(v);
           if (o && o.secret) {
-            // Match the chat scope (e.g. '<resource>/ChatAI.ReadWrite'); take the
-            // first non-matching token only as a last-resort fallback.
+            // Match the chat scope (e.g. '<resource>/ChatAI.ReadWrite').
+            // STRICT REQUIREMENT: Do NOT fallback to other tokens (like Graph API),
+            // as they lack the correct permissions and often lack oid/tid claims.
             if (o.target && o.target.indexOf('ChatAI') !== -1) return o.secret;
-            if (!fallback) fallback = o.secret;
           }
         } catch (e) {}
       }
     }
-    return fallback;
+    return null;
   } catch (e) {}
   return null;
 }

@@ -130,28 +130,49 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
     """
     cid = new_id()
     created = int(time.time())
+    
+    # We delay yielding the initial role chunk until we successfully get the first item from Copilot.
+    # This allows auth errors to propagate up before any SSE events are sent, enabling seamless session fallback.
+    stream = session.client.stream(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
+    
     try:
-        yield sse_event(stream_chunk(cid, created, model, {"role": "assistant"}))
-        stream = session.client.stream(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
+        first_item = next(stream)
+    except StopIteration:
+        first_item = None
+        
+    yield sse_event(stream_chunk(cid, created, model, {"role": "assistant"}))
+    
+    try:
         final_text = ""
         final_thought = ""
         cleaner = StreamCleaner()
-        for piece in stream:
+        
+        def process_piece(piece):
+            nonlocal final_text, final_thought
             if isinstance(piece, str) and piece:
                 cleaned_piece = cleaner.process(piece)
                 final_text += cleaned_piece
                 if cleaned_piece:
-                    yield sse_event(stream_chunk(cid, created, model, {"content": cleaned_piece}))
+                    return sse_event(stream_chunk(cid, created, model, {"content": cleaned_piece}))
             elif isinstance(piece, dict):
                 if "thought" in piece:
                     final_thought += piece["thought"]
-                    yield sse_event(stream_chunk(cid, created, model, {"reasoning_content": piece["thought"]}))
+                    return sse_event(stream_chunk(cid, created, model, {"reasoning_content": piece["thought"]}))
                 elif "citations" in piece:
                     cleaner.add_citations(piece["citations"])
             elif isinstance(piece, ImageResponse) and piece.url:
                 markdown_img = f"\n\n![Generated Image]({piece.url})\n\n"
                 final_text += markdown_img
-                yield sse_event(stream_chunk(cid, created, model, {"content": markdown_img}))
+                return sse_event(stream_chunk(cid, created, model, {"content": markdown_img}))
+            return None
+
+        if first_item:
+            res = process_piece(first_item)
+            if res: yield res
+
+        for piece in stream:
+            res = process_piece(piece)
+            if res: yield res
         
         # Flush any remaining text in the cleaner
         flushed = cleaner.flush()
@@ -241,16 +262,33 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
 
     try:
         if req.stream:
-            # Wrap the generator so we can check the acquired session
             def stream_wrapper():
                 nonlocal conversation_id
-                with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
-                    if preferred_session and session.session_name != preferred_session:
-                        # We fell back to a different account; Copilot conversation IDs are tied to accounts,
-                        # so we must start a fresh conversation instead of failing.
-                        conversation_id = None
-                        
-                    yield from _stream(session, prompt, model, req.messages, conversation_id, plugins)
+                nonlocal preferred_session
+                
+                # Try up to 3 different sessions from the pool if auth fails
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                            if preferred_session and session.session_name != preferred_session:
+                                # We fell back to a different account; Copilot conversation IDs are tied to accounts,
+                                # so we must start a fresh conversation instead of failing.
+                                conversation_id = None
+                                
+                            yield from _stream(session, prompt, model, req.messages, conversation_id, plugins)
+                            return  # Success, exit retry loop
+                    except RuntimeError as e:
+                        if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
+                            print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
+                            # Force this session to be unhealthy by removing its token, so the next acquire picks a different session
+                            session.client.invalidate_auth()
+                            # Clear preferred_session so pool.acquire_session is free to pick the next best healthy session
+                            preferred_session = None
+                            if attempt == max_retries - 1:
+                                raise
+                            continue
+                        raise
     
             return StreamingResponse(
                 stream_wrapper(),
@@ -258,11 +296,24 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
             )
         else:
-            with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
-                if preferred_session and session.session_name != preferred_session:
-                    conversation_id = None
-                
-                reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                        if preferred_session and session.session_name != preferred_session:
+                            conversation_id = None
+                        
+                        reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
+                        break  # Success
+                except RuntimeError as e:
+                    if "Failed to decode oid/tid" in str(e) or "ClearanceRequired" in str(e) or "rate limit" in str(e).lower():
+                        print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
+                        session.client.invalidate_auth()
+                        preferred_session = None
+                        if attempt == max_retries - 1:
+                            raise
+                        continue
+                    raise
             final_text = reply.text
             if reply.images:
                 for img in reply.images:
