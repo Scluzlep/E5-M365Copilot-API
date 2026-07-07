@@ -20,3 +20,5 @@ CLAUDE.md
 # Playwright local browsers
 .browsers/
 .env
+sessions/
+session/
