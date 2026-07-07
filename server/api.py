@@ -38,6 +38,9 @@ from .claude_format import (
 app = FastAPI(title="Copilot OpenAI-compatible API", version="1.0.0")
 security = HTTPBearer(auto_error=False)
 
+from server.api_azure_config import router as azure_config_router
+app.include_router(azure_config_router)
+
 # (Locks and rate limits are now managed per-account in server/accounts.py)
 
 from .accounts import pool, RateLimitExceeded

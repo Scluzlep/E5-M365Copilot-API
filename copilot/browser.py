@@ -73,6 +73,35 @@ _FIND_TOKEN_JS = """
   return null;
 }
 """
+
+# Discover the Graph API MSAL access token from localStorage or sessionStorage.
+# This token is required for uploading documents (PDF, DOCX, etc.) to OneDrive.
+_FIND_GRAPH_TOKEN_JS = """
+() => {
+  try {
+    const stores = [localStorage, sessionStorage];
+    for (const store of stores) {
+      if (!store) continue;
+      for (let i = 0; i < store.length; i++) {
+        const k = store.key(i);
+        const v = store.getItem(k);
+        if (v && v.indexOf('"credentialType":"AccessToken"') !== -1) {
+          try {
+            const o = JSON.parse(v);
+            if (o && o.secret) {
+              if (o.target && (o.target.indexOf('graph.microsoft.com') !== -1 || o.target.indexOf('Files.') !== -1)) {
+                 return o.secret;
+              }
+            }
+          } catch (e) {}
+        }
+      }
+    }
+    return null;
+  } catch (e) {}
+  return null;
+}
+"""
 # True once the user is signed in, *before* the chat token is minted. MSAL writes
 # an `msal.*.account.keys` index (a non-empty list of cached accounts) the moment
 # sign-in completes — and, crucially, this index is NOT encrypted even when the
@@ -403,6 +432,14 @@ class BrowserCopilot:
         except PlaywrightError:
             return None
 
+    def graph_token(self) -> Optional[str]:
+        """Return the Graph API token required for document uploads, or ``None``."""
+        self._ensure_started()
+        try:
+            return self._page.evaluate(_FIND_GRAPH_TOKEN_JS)
+        except PlaywrightError:
+            return None
+
     def signed_in(self) -> bool:
         """True once a Microsoft/Google account is cached (sign-in complete)."""
         self._ensure_started()
@@ -569,19 +606,17 @@ class BrowserCopilot:
         }
 
     def export_auth(self, path: str = DEFAULT_AUTH_FILE, stamp: Optional[float] = None) -> dict:
-        """Snapshot the signed-in cookies + access token to ``path`` as JSON.
+        """Save the chat token, graph token, and Microsoft cookies to ``path``.
 
-        ``stamp`` is the epoch seconds to record as ``saved_at`` (pass
-        ``time.time()`` from the caller). Returns the auth dict.
-        """
+        Returns the snapshot dict."""
+        self._ensure_started()
         auth = {
             "cookies": self.cookies(),
             "access_token": self.access_token(),
+            "graph_token": self.graph_token(),
             "refresh_token": getattr(self, "_captured_refresh_token", None),
-            # Federated logins (Google) ride an extra &X-UserIdentityType= on the
-            # chat socket; the drivers replay it. None for Microsoft accounts.
-            "identity_type": self._captured_identity_type,
-            "saved_at": stamp if stamp is not None else 0,
+            "identity_type": getattr(self, "_captured_identity_type", None),
+            "saved_at": stamp or time.time(),
         }
         dest = Path(path)
         dest.parent.mkdir(parents=True, exist_ok=True)

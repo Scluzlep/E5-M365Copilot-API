@@ -3,3 +3,4 @@ playwright>=1.60
 fastapi>=0.110
 uvicorn[standard]>=0.29
 requests>=2.31.0
+msal>=1.28.0

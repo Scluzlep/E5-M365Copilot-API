@@ -164,94 +164,117 @@ class Copilot(AbstractProvider):
                         mime = att["mime_type"]
                         fname = att["file_name"]
                         
-                        scenario = "UploadImage" if mime.startswith("image/") else "CopilotAttachment"
+                        import os
+                        from .azure_uploader import AzureUploader
                         
-                        def _try_upload(scen):
-                            boundary = '----WebKitFormBoundary' + uuid.uuid4().hex
-                            data_b64 = f"data:{mime};base64,{base64.b64encode(data).decode('utf-8')}"
-                            body = (
-                                f"--{boundary}\r\n"
-                                f'Content-Disposition: form-data; name="scenario"\r\n\r\n'
-                                f'{scen}\r\n'
-                                f'--{boundary}\r\n'
-                                f'Content-Disposition: form-data; name="conversationId"\r\n\r\n'
-                                f'{conversation_id}\r\n'
-                                f'--{boundary}\r\n'
-                                f'Content-Disposition: form-data; name="FileBase64"\r\n\r\n'
-                                f'{data_b64}\r\n'
-                                f'--{boundary}--\r\n'
-                            ).encode('utf-8')
-                            
-                            headers = {
-                                "content-type": f"multipart/form-data; boundary={boundary}",
-                                "origin": "https://m365.cloud.microsoft",
-                                "referer": "https://m365.cloud.microsoft/",
-                                "user-agent": CHROME_UA,
-                                "accept-language": US_ACCEPT_LANGUAGE,
-                                "sec-fetch-dest": "empty",
-                                "sec-fetch-mode": "cors",
-                                "sec-fetch-site": "cross-site",
-                                **CHROME_CLIENT_HINTS,
-                            }
-                            if access_token:
-                                parts = access_token.split('.')
-                                if len(parts) >= 2:
-                                    pad = len(parts[1]) % 4
-                                    try:
-                                        payload = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * pad).decode('utf-8'))
-                                        oid = payload.get("oid", "")
-                                        tid = payload.get("tid", "")
-                                        if oid and tid:
-                                            headers["x-anchormailbox"] = f"Oid:{oid}@{tid}"
-                                    except Exception:
-                                        pass
-                                headers["x-scenario"] = "OfficeWebIncludedCopilot"
-                                headers["x-variants"] = "feature.EnableImageSupportInUploadFile"
-                                headers["authorization"] = f"Bearer {access_token}"
-
-                            resp = session.post(
-                                "https://substrate.office.com/m365Copilot/UploadFile",
-                                headers=headers,
-                                data=body,
-                            )
-                            raise_for_status(resp)
-                            res_json = resp.json()
-                            print(f"[Driver] UploadFile response ({scen}): {res_json}")
-                            file_id = res_json.get("id") or res_json.get("docId")
-                            file_url = res_json.get("url") or res_json.get("FileUrl") or ""
-                            if not file_id:
-                                raise ValueError("Missing id or docId")
-                            return file_id, file_url
-
-                        try:
-                            file_id, file_url = _try_upload(scenario)
-                        except Exception as e:
-                            print(f"[Driver] Upload failed for scenario '{scenario}' ({fname}): {e}", file=sys.stderr)
-                            if scenario != "UploadImage":
-                                try:
-                                    file_id, file_url = _try_upload("UploadImage")
-                                except Exception as e2:
-                                    print(f"[Driver] Fallback upload failed for scenario 'UploadImage' ({fname}): {e2}", file=sys.stderr)
-                                    file_id, file_url = None, None
+                        # session_dir is like "sessions/session_name"
+                        session_name = os.path.basename(self.session_dir) if hasattr(self, 'session_dir') else "session"
+                        
+                        print(f"[Driver] Using AzureUploader to upload {fname} (mime: {mime}) for session: {session_name}")
+                        upload_result = AzureUploader.upload_file(session_name, fname, data, mime)
+                        
+                        if upload_result and "id" in upload_result:
+                            item_id = upload_result["id"]
+                            if mime.startswith("image/"):
+                                img_obj = {"type": "image", "id": item_id}
+                                file_url = upload_result.get("webUrl")
+                                if file_url: img_obj["url"] = file_url
+                                images.append(img_obj)
+                                print(f"[Driver] Attached image {fname} to prompt.")
                             else:
-                                file_id, file_url = None, None
+                                # Synthesize the annotation but first call unfurl
+                                file_url = upload_result.get("webUrl")
+                                doc_id = upload_result.get("spo_id") or item_id
                                 
-                        if not file_id:
-                            raise RuntimeError(f"Failed to upload attachment {fname}: missing id in Substrate response.")
-                            
-                        # If it's an image, Copilot supports it in the content array.
-                        # For other files, we attach them as LocalFile in messageAnnotations.
-                        if mime.startswith("image/"):
-                            img_obj = {"type": "image", "id": file_id}
-                            if file_url: img_obj["url"] = file_url
-                            images.append(img_obj)
+                                # Call unfurl API
+                                unfurl_payload = {
+                                    "EntityRequests": [
+                                        {
+                                            "QueryAnnotations": [
+                                                {
+                                                    "Id": doc_id,
+                                                    "Type": "File",
+                                                    "Text": fname,
+                                                    "AnnotationEntityMetadata": {
+                                                        "SPWebUrl": upload_result.get("tenant_url", "")
+                                                    }
+                                                }
+                                            ],
+                                            "PreferredResultSourceFormat": "EntityData",
+                                            "SupportedResultSourceFormats": ["EntityData"]
+                                        }
+                                    ],
+                                    "LogicalId": str(uuid.uuid4()),
+                                    "Cvid": conversation_id,
+                                    "Scenario": {
+                                        "Name": "Harmony.Web.Copilot_Peek",
+                                        "Dimensions": [
+                                            {"DimensionName": "ScenarioDescription", "DimensionValue": "OfficeWebIncludedCopilot.prefetch.getdocumentsummary.fileciq"},
+                                            {"DimensionName": "ScenarioType", "DimensionValue": "PO"}
+                                        ]
+                                    },
+                                    "CacheMode": "FireForget"
+                                }
+                                try:
+                                    headers = {
+                                        "accept": "application/json",
+                                        "content-type": "application/json",
+                                        "origin": "https://m365.cloud.microsoft",
+                                        "referer": "https://m365.cloud.microsoft/",
+                                        "user-agent": CHROME_UA,
+                                        "client-request-id": str(uuid.uuid4()),
+                                        "client-session-id": str(uuid.uuid4())
+                                    }
+                                    if access_token:
+                                        headers["authorization"] = f"Bearer {access_token}"
+                                        
+                                        # Try to extract oid/tid for x-anchormailbox
+                                        try:
+                                            parts = access_token.split(".")
+                                            if len(parts) >= 2:
+                                                import base64, json
+                                                payload_b64 = parts[1]
+                                                payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
+                                                payload_data = json.loads(base64.urlsafe_b64decode(payload_b64.encode()).decode("utf-8", "ignore"))
+                                                oid = payload_data.get("oid")
+                                                tid = payload_data.get("tid")
+                                                if oid and tid:
+                                                    headers["x-anchormailbox"] = f"Oid:{oid}@{tid}"
+                                                    headers["x-routingparameter-sessionkey"] = f"Oid:{oid}@{tid}"
+                                        except Exception:
+                                            pass
+                                            
+                                    # Add explicit Cookie header to bypass domain filtering
+                                    if cookies:
+                                        if isinstance(cookies, dict):
+                                            headers["cookie"] = "; ".join([f"{k}={v}" for k, v in cookies.items()])
+                                        elif isinstance(cookies, str):
+                                            headers["cookie"] = cookies
+
+                                    print(f"[Driver] Unfurl headers being sent: {headers}")
+
+                                    # Send unfurl with the exact same session (which has cookies/auth)
+                                    unfurl_resp = session.post(
+                                        "https://substrate.office.com/searchservice/api/v1/unfurl?domain=File",
+                                        headers=headers,
+                                        json=unfurl_payload
+                                    )
+                                    print(f"[Driver] Unfurl response: {unfurl_resp.status_code}")
+                                    if unfurl_resp.status_code != 200:
+                                        print(f"[Driver] Unfurl error: {unfurl_resp.text}")
+                                        print(f"[Driver] Unfurl resp headers: {dict(unfurl_resp.headers)}")
+                                except Exception as e:
+                                    print(f"[Driver] Unfurl request failed: {e}")
+
+                                message_annotations.append({
+                                    "id": doc_id,
+                                    "text": fname,
+                                    "url": file_url,
+                                    "messageAnnotationType": "File"
+                                })
+                                print(f"[Driver] Attached File annotation for {fname}.")
                         else:
-                            message_annotations.append({
-                                "id": file_id,
-                                "text": fname,
-                                "url": file_url,
-                                "messageAnnotationType": "LocalFile"
-                            })
+                            print(f"[Driver] AzureUploader failed for {fname}")
                 else:
                     # Non-E5 fallback (only supports single image via /attachments)
                     for att in e5_attachments:
@@ -437,11 +460,12 @@ class Copilot(AbstractProvider):
                                     "author": "user",
                                     "inputMethod": "Keyboard",
                                     "text": prompt,
+                                    "entityAnnotationTypes": ["People", "File", "Event", "Email", "TeamsMessage"],
                                     "requestId": str(uuid.uuid4()),
                                     "locale": "zh-cn",
                                     "messageType": "Chat",
                                     "experienceType": "Default",
-                                    "messageAnnotations": [
+                                    "messageAnnotations": ([
                                         {
                                             "id": img.get("id", str(uuid.uuid4())),
                                             "messageAnnotationMetadata": {
@@ -453,7 +477,7 @@ class Copilot(AbstractProvider):
                                             },
                                             "messageAnnotationType": "ImageFile"
                                         } for img in images
-                                    ] if images else [],
+                                    ] if images else []) + (message_annotations if message_annotations else []),
                                 },
                                 "plugins": resolved_plugins or [{"Id": "BingWebSearch", "Source": "BuiltIn"}],
                                 "isSbsSupported": True,
