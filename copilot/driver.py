@@ -329,6 +329,19 @@ class Copilot(AbstractProvider):
                                     "locale": "zh-cn",
                                     "messageType": "Chat",
                                     "experienceType": "Default",
+                                    "messageAnnotations": [
+                                        {
+                                            "id": str(uuid.uuid4()),
+                                            "messageAnnotationMetadata": {
+                                                "@type": "File",
+                                                "annotationType": "File",
+                                                "fileType": "jpg",
+                                                "fileName": "image.jpg",
+                                                "url": img["url"]
+                                            },
+                                            "messageAnnotationType": "ImageFile"
+                                        } for img in images
+                                    ] if images else [],
                                 },
                                 "plugins": resolved_plugins or [{"Id": "BingWebSearch", "Source": "BuiltIn"}],
                                 "isSbsSupported": True,
