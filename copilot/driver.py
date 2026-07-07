@@ -162,13 +162,52 @@ class Copilot(AbstractProvider):
             images = []
             if image is not None:
                 data = to_bytes(image)
-                response = session.post(
-                    f"{self.url}/c/api/attachments",
-                    headers={"content-type": is_accepted_format(data)},
-                    data=data,
-                )
-                raise_for_status(response)
-                images.append({"type": "image", "url": response.json().get("url")})
+                if "m365.cloud.microsoft" in self.url:
+                    import base64
+                    boundary = '----WebKitFormBoundary' + uuid.uuid4().hex
+                    data_b64 = f"data:{is_accepted_format(data)};base64,{base64.b64encode(data).decode('utf-8')}"
+                    
+                    body = (
+                        f"--{boundary}\r\n"
+                        f'Content-Disposition: form-data; name="scenario"\r\n\r\n'
+                        f'UploadImage\r\n'
+                        f'--{boundary}\r\n'
+                        f'Content-Disposition: form-data; name="conversationId"\r\n\r\n'
+                        f'{conversation_id}\r\n'
+                        f'--{boundary}\r\n'
+                        f'Content-Disposition: form-data; name="FileBase64"\r\n\r\n'
+                        f'{data_b64}\r\n'
+                        f'--{boundary}--\r\n'
+                    ).encode('utf-8')
+                    
+                    headers = {
+                        "content-type": f"multipart/form-data; boundary={boundary}",
+                    }
+                    if access_token:
+                        headers["authorization"] = f"Bearer {access_token}"
+                        
+                    response = session.post(
+                        "https://substrate.office.com/m365Copilot/UploadFile",
+                        headers=headers,
+                        data=body,
+                    )
+                    raise_for_status(response)
+                    try:
+                        res_json = response.json()
+                        img_id = res_json.get("id") or str(uuid.uuid4())
+                        img_url = res_json.get("url") or res_json.get("FileUrl") or ""
+                    except Exception:
+                        img_id = str(uuid.uuid4())
+                        img_url = ""
+                    images.append({"type": "image", "id": img_id, "url": img_url})
+                else:
+                    response = session.post(
+                        f"{self.url}/c/api/attachments",
+                        headers={"content-type": is_accepted_format(data)},
+                        data=data,
+                    )
+                    raise_for_status(response)
+                    images.append({"type": "image", "id": str(uuid.uuid4()), "url": response.json().get("url")})
 
             send_payload = {
                 "event": "send",
@@ -331,13 +370,13 @@ class Copilot(AbstractProvider):
                                     "experienceType": "Default",
                                     "messageAnnotations": [
                                         {
-                                            "id": str(uuid.uuid4()),
+                                            "id": img.get("id", str(uuid.uuid4())),
                                             "messageAnnotationMetadata": {
                                                 "@type": "File",
                                                 "annotationType": "File",
                                                 "fileType": "jpg",
                                                 "fileName": "image.jpg",
-                                                "url": img["url"]
+                                                "url": img.get("url", "")
                                             },
                                             "messageAnnotationType": "ImageFile"
                                         } for img in images
