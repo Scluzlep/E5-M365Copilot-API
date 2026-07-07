@@ -385,6 +385,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                                 # so we must start a fresh conversation instead of failing.
                                 conversation_id = None
                                 
+                            print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
                             yield from _stream(session, prompt, model, req.messages, conversation_id, plugins)
                             return  # Success, exit retry loop
                         except RuntimeError as e:
@@ -413,6 +414,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                         if preferred_session and session.session_name != preferred_session:
                             conversation_id = None
                         
+                        print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
                         reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=plugins)
                         break  # Success
                     except RuntimeError as e:
@@ -506,6 +508,8 @@ def claude_messages(
                     try:
                         if preferred_session and session.session_name != preferred_session:
                             conversation_id = None
+                            
+                        print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
                         yield from _stream_claude(session, prompt, model, standard_messages, plugins=None, conversation_id=conversation_id)
                         return
                     except RuntimeError as e:
@@ -531,6 +535,8 @@ def claude_messages(
                 try:
                     if preferred_session and session.session_name != preferred_session:
                         conversation_id = None
+                        
+                    print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
                     reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=None)
                     break
                 except RuntimeError as e:

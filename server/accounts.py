@@ -119,6 +119,14 @@ class SessionInstance:
             pass
         return info
 
+    def get_email(self) -> str:
+        if hasattr(self, "_cached_email") and self._cached_email:
+            return self._cached_email
+        email = self.get_info().get("email", "unknown")
+        if email != "N/A" and email != "unknown":
+            self._cached_email = email
+        return email
+
 class AccountPool:
     """Manages multiple E5 Copilot accounts and routes API keys to them."""
     
