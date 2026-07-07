@@ -272,7 +272,7 @@ class AccountPool:
                 self._round_robin_counters[api_key] = (self._round_robin_counters[api_key] + 1) % len(session_names)
             current_rr_idx = self._round_robin_counters[api_key]
 
-        # Prioritize preferred_session, then healthy sessions, then round-robin order
+        # Prioritize preferred_session, then round-robin order
         def sort_key(s):
             is_pref = (s.session_name == preferred_session)
             # Find the original index of this session to compute round-robin distance
@@ -281,7 +281,7 @@ class AccountPool:
             except ValueError:
                 original_idx = 0
             rr_distance = (original_idx - current_rr_idx) % len(session_names)
-            return (not is_pref, not s.is_healthy(), rr_distance)
+            return (not is_pref, rr_distance)
             
         all_sessions.sort(key=sort_key)
         
