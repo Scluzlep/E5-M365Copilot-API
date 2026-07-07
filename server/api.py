@@ -43,7 +43,7 @@ from .accounts import pool, RateLimitExceeded
 import re
 
 _RE_BRACKET_CITE = re.compile(r'【\d+-[a-zA-Z0-9]+】')
-_RE_UNICODE_CITE = re.compile(r'\ue200cite((?:\ue202turn\d+search\d+)+)\ue201')
+_RE_UNICODE_CITE = re.compile(r'\ue200cite((?:\ue202[^\ue201\ue202]+)+)\ue201')
 _RE_OLD_CITE = re.compile(r'\u200b?cite((?:turn\d+search\d+)+)\u200b?')
 _RE_E200_STRIP = re.compile(r'\ue200.*')
 
@@ -59,8 +59,11 @@ class StreamCleaner:
 
     def _replace_citations(self, match) -> str:
         cite_block = match.group(0)
-        # 提取其中所有的 turnXsearchY
-        refs = re.findall(r'turn\d+search\d+', cite_block)
+        if '\ue202' in cite_block:
+            refs = re.findall(r'\ue202([^\ue201\ue202]+)', cite_block)
+        else:
+            refs = re.findall(r'turn\d+search\d+', cite_block)
+            
         if not refs:
             return ""
         
@@ -71,8 +74,11 @@ class StreamCleaner:
                 self.ref_counter += 1
             idx = self.ref_map[ref]
             
-            # Inline we just put [1]
-            replacements.append(f"[{idx}]")
+            cite_info = self.citations.get(ref)
+            if cite_info and cite_info.get("url"):
+                replacements.append(f"[[{idx}]]({cite_info['url']})")
+            else:
+                replacements.append(f"[{idx}]")
                 
         return "".join(replacements)
 
