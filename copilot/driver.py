@@ -575,13 +575,20 @@ class Copilot(AbstractProvider):
                             source_attrs = msg_obj.get("sourceAttributions", [])
                             if source_attrs:
                                 citations = {}
-                                for attr in source_attrs:
+                                for i, attr in enumerate(source_attrs):
                                     url = attr.get("seeMoreUrl")
                                     name = attr.get("providerDisplayName", "")
                                     meta_str = attr.get("referenceMetadata", "{}")
                                     try:
-                                        meta = json.loads(meta_str)
+                                        meta = json.loads(meta_str) if isinstance(meta_str, str) else {}
                                         ref_id = meta.get("citationRefId") or meta.get("referenceId")
+                                        if not ref_id:
+                                            ref_id = str(i + 1)
+                                            # Bing often implicitly maps turnXsearchY to these if missing.
+                                            # We'll map multiple possible implicit keys just in case.
+                                            citations[str(i + 1)] = {"url": url, "name": name}
+                                            citations[f"turn0search{i+1}"] = {"url": url, "name": name}
+                                            citations[f"turn1search{i+1}"] = {"url": url, "name": name}
                                         if ref_id and url:
                                             citations[ref_id] = {"url": url, "name": name}
                                     except Exception:
