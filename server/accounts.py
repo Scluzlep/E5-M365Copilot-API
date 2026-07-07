@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import shutil
 
 from copilot.client import CopilotClient
+from copilot.utils import mask_token
 from .config import RATE_LIMIT_RPM, RATE_LIMIT_BURST
 from .ratelimit import TokenBucket
 
@@ -294,12 +295,16 @@ class AccountPool:
                             # Trigger Pure API token renewal (with browser fallback) while locked
                             sess.client._fresh_auth()
                         except Exception as e:
-                            print(f"[Pool] Failed to renew session {sess.session_name}: {e}")
+                            print(f"[Pool] Failed to renew session {sess.session_name}: {mask_token(e)}")
                             sess.lock.release()
+                            with self._session_released_cv:
+                                self._session_released_cv.notify_all()
                             return False
                     return True
                 else:
                     sess.lock.release()
+                    with self._session_released_cv:
+                        self._session_released_cv.notify_all()
                     if wait < min_wait:
                         min_wait = wait
             return False

@@ -26,7 +26,7 @@ from .challenges import solve_copilot_challenge, solve_hashcash
 from .models import AbstractProvider, Conversation, ImageResponse, ImageType
 from .protocol import CHAT_WEBSOCKET_URL, CONSENTS_FRAME, SET_OPTIONS_FRAME
 from .useragent import CHROME_CLIENT_HINTS, CHROME_UA, IMPERSONATE_TARGET, US_ACCEPT_LANGUAGE
-from .utils import drain_json, is_accepted_format, raise_for_status, to_bytes
+from .utils import drain_json, is_accepted_format, raise_for_status, to_bytes, mask_token
 from .agent_registry import get_agent_config
 
 
@@ -278,7 +278,7 @@ class Copilot(AbstractProvider):
                             oid = payload_data.get("oid")
                             tid = payload_data.get("tid")
                     except Exception as e:
-                        print(f"[Driver] Failed to decode JWT for oid/tid: {e}")
+                        print(f"[Driver] Failed to decode JWT for oid/tid: {mask_token(e)}")
                 
                 # Fallbacks if decoding fails
                 if not oid or not tid:
@@ -560,6 +560,12 @@ class Copilot(AbstractProvider):
                     continue
                 last_msg = msg
                 msg_type = msg.get("type")
+                if msg_type == 6:
+                    try:
+                        wss.send('{"type":6}\x1e'.encode("utf-8"), CurlWsFlag.TEXT)
+                    except Exception:
+                        pass
+                    continue
                 if msg_type == 1 and msg.get("target") == "update":
                     for arg in msg.get("arguments", []):
                         if not isinstance(arg, dict):

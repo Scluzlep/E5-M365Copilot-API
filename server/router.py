@@ -22,6 +22,9 @@ class ConversationRouter:
         self.active_heads: Dict[str, str] = {}
         self._lock = threading.Lock()
         self.persist_path = os.path.join("sessions", "conversations.json")
+        self._dirty = False
+        self._timer: Optional[threading.Timer] = None
+        self._debounce_seconds = 2.0
         self._load_from_disk()
 
     def _load_from_disk(self):
@@ -37,14 +40,29 @@ class ConversationRouter:
                 import sys
                 print(f"[router] Failed to load persisted state: {e}", file=sys.stderr)
 
-    def _save_to_disk(self):
-        import json, os
-        try:
-            os.makedirs("sessions", exist_ok=True)
+    def _schedule_save(self):
+        # Must be called with self._lock held
+        self._dirty = True
+        if self._timer is None:
+            self._timer = threading.Timer(self._debounce_seconds, self._flush_disk)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def _flush_disk(self):
+        with self._lock:
+            if not self._dirty:
+                self._timer = None
+                return
+            self._dirty = False
+            self._timer = None
             data = {
                 "states": {h: {"conversation_id": s.conversation_id, "session_name": s.session_name} for h, s in self.states.items()},
                 "active_heads": self.active_heads
             }
+        
+        import json, os
+        try:
+            os.makedirs("sessions", exist_ok=True)
             tmp_path = self.persist_path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
@@ -52,6 +70,13 @@ class ConversationRouter:
         except Exception as e:
             import sys
             print(f"[router] Failed to persist state: {e}", file=sys.stderr)
+
+    def flush(self):
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
+                self._timer = None
+        self._flush_disk()
 
     def _hash_messages(self, messages) -> str:
         """Create a deterministic hash from a list of ChatMessage."""
@@ -86,35 +111,50 @@ class ConversationRouter:
         history = messages[:-1]
         last_msg = messages[-1]
         
-        history_hash = self._hash_messages(history)
-        new_head_hash = self._hash_messages(messages)
+        raw_history_hash = self._hash_messages(history)
+        raw_new_hash = self._hash_messages(messages)
+        
+        # Get all bound session names for this api_key to check compound keys
+        session_names = []
+        with pool._config_lock:
+            session_names = list(pool.api_keys.get(api_key, []))
         
         # Check if this exact history is the current head of a tracked conversation
         with self._lock:
-            if history_hash in self.states:
-                state = self.states[history_hash]
-                # Move to end to mark as recently used
-                self.states.move_to_end(history_hash)
+            for s_name in session_names:
+                compound_key = f"{api_key}:{s_name}:{raw_history_hash}"
+                if compound_key in self.states:
+                    state = self.states[compound_key]
+                    self.states.move_to_end(compound_key)
+                    prompt = content_text(last_msg.content)
+                    if last_msg.role != "user":
+                        prompt = f"{last_msg.role.capitalize()}: {prompt}"
+                    return state.conversation_id, prompt, raw_new_hash, state.session_name
+            
+            # Also check fallback (legacy non-compound hash or single session)
+            if raw_history_hash in self.states:
+                state = self.states[raw_history_hash]
+                self.states.move_to_end(raw_history_hash)
                 prompt = content_text(last_msg.content)
-                # Add a cue if it's from a user, though Copilot usually figures it out.
                 if last_msg.role != "user":
                     prompt = f"{last_msg.role.capitalize()}: {prompt}"
-                return state.conversation_id, prompt, new_head_hash, state.session_name
+                return state.conversation_id, prompt, raw_new_hash, state.session_name
             
         # Fallback: Flatten the entire history and start a new Copilot thread
         prompt = messages_to_prompt(messages)
-        return None, prompt, new_head_hash, None
+        return None, prompt, raw_new_hash, None
         
-    def save_state(self, new_head_hash: str, conversation_id: str, session_name: str):
+    def save_state(self, new_head_hash: str, conversation_id: str, session_name: str, api_key: str = ""):
         """Record the new state after a successful turn."""
         if new_head_hash and conversation_id and session_name:
             with self._lock:
                 old_head = self.active_heads.get(conversation_id)
                 if old_head and old_head in self.states:
                     del self.states[old_head]
-                    
-                self.states[new_head_hash] = ConversationState(conversation_id, new_head_hash, session_name)
-                self.active_heads[conversation_id] = new_head_hash
+                
+                compound_key = f"{api_key}:{session_name}:{new_head_hash}" if api_key else new_head_hash
+                self.states[compound_key] = ConversationState(conversation_id, compound_key, session_name)
+                self.active_heads[conversation_id] = compound_key
                 
                 # Evict oldest states if it grows too large (FIFO from OrderedDict)
                 while len(self.states) > 10000:
@@ -122,7 +162,7 @@ class ConversationRouter:
                     if self.active_heads.get(old_state.conversation_id) == oldest_key:
                         self.active_heads.pop(old_state.conversation_id, None)
                 
-                self._save_to_disk()
+                self._schedule_save()
 
 # Global router instance
 router = ConversationRouter()

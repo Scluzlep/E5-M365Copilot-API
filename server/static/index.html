@@ -220,7 +220,10 @@
             let vncUrl = cfg.vnc_url;
             if (!vncUrl) {
                 // Default to the embedded FastAPI noVNC proxy
-                vncUrl = `/novnc/vnc.html?autoconnect=true&path=vnc-ws`;
+                const adminPwd = localStorage.getItem('admin_pwd') || '';
+                document.cookie = `admin_pwd=${encodeURIComponent(adminPwd)}; path=/; SameSite=Strict`;
+                const wsPath = encodeURIComponent(`vnc-ws?token=${encodeURIComponent(adminPwd)}`);
+                vncUrl = `/novnc/vnc.html?autoconnect=true&path=${wsPath}`;
             }
             
             // Load noVNC iframe

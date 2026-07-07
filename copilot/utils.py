@@ -57,3 +57,20 @@ def is_accepted_format(data: bytes) -> str:
     elif data.startswith(b'\xff\xd8'):
         return 'image/jpeg'
     return 'application/octet-stream'
+
+
+import re
+from typing import Any
+
+_RE_TOKEN_MASK = re.compile(r'((?:access_token|accessToken)=)[^&\s"\']+', re.IGNORECASE)
+_RE_BEARER_MASK = re.compile(r'(Bearer\s+)[A-Za-z0-9\-\._~\+/]+=*', re.IGNORECASE)
+
+def mask_token(val: Any) -> str:
+    """Mask sensitive E5 access tokens and Bearer credentials in logs or error messages."""
+    if val is None:
+        return ""
+    text = str(val)
+    text = _RE_TOKEN_MASK.sub(r'\1***[REDACTED]***', text)
+    text = _RE_BEARER_MASK.sub(r'\1***[REDACTED]***', text)
+    return text
+

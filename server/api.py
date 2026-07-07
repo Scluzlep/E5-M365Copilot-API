@@ -12,6 +12,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
 from copilot.models import ImageResponse
+from copilot.utils import mask_token
 
 from .config import MODEL_NAME
 from .openai_format import (
@@ -213,7 +214,7 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
             from .schemas import ChatMessage
             updated_messages = messages + [ChatMessage(role="assistant", content=final_text, reasoning_content=final_thought if final_thought else None)]
             new_head_hash = router._hash_messages(updated_messages)
-            router.save_state(new_head_hash, stream.conversation_id, session.session_name)
+            router.save_state(new_head_hash, stream.conversation_id, session.session_name, api_key=api_key)
 
         # Copilot's conversation id is known once the stream has run; emit it
         yield sse_event(
@@ -236,7 +237,7 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
         yield sse_event(stream_chunk(cid, created, model, {"content": f"\n[error: rate limit exceeded, retry in {secs}s]"}, finish="error"))
     except Exception as exc:  # surface errors to the client instead of hanging
         import traceback, sys
-        print(f"[stream error] {traceback.format_exc()}", file=sys.stderr)
+        print(mask_token(f"[stream error] {traceback.format_exc()}"), file=sys.stderr)
         yield sse_event(
             stream_chunk(cid, created, model, {"content": "\n[error: upstream request failed]"}, finish="error")
         )
@@ -314,7 +315,7 @@ def _stream_claude(session, prompt: str, model: str, messages: list, plugins=Non
             from .schemas import ChatMessage
             updated_messages = messages + [ChatMessage(role="assistant", content=final_text, reasoning_content=final_thought if final_thought else None)]
             new_head_hash = router._hash_messages(updated_messages)
-            router.save_state(new_head_hash, stream.conversation_id, session.session_name)
+            router.save_state(new_head_hash, stream.conversation_id, session.session_name, api_key=api_key)
 
         yield stream_content_block_stop(index=0)
         yield stream_message_delta(stop_reason="end_turn")
@@ -328,7 +329,7 @@ def _stream_claude(session, prompt: str, model: str, messages: list, plugins=Non
         yield stream_message_stop()
     except Exception as exc:
         import traceback, sys
-        print(f"[stream error] {traceback.format_exc()}", file=sys.stderr)
+        print(mask_token(f"[stream error] {traceback.format_exc()}"), file=sys.stderr)
         yield stream_content_block_delta(index=0, text="\n[error: upstream request failed]")
         yield stream_content_block_stop(index=0)
         yield stream_message_delta(stop_reason="error")
@@ -459,7 +460,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                 from .schemas import ChatMessage
                 updated_messages = req.messages + [ChatMessage(role="assistant", content=final_text)]
                 new_head_hash = router._hash_messages(updated_messages)
-                router.save_state(new_head_hash, reply.conversation_id, session.session_name)
+                router.save_state(new_head_hash, reply.conversation_id, session.session_name, api_key=api_key)
             return completion_response(final_text, model, reply.conversation_id)
     except RateLimitExceeded as exc:
         secs = max(1, round(exc.wait_seconds))
@@ -474,7 +475,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
         )
     except Exception as exc:
         import traceback, sys
-        print(f"[chat error] {traceback.format_exc()}", file=sys.stderr)
+        print(mask_token(f"[chat error] {traceback.format_exc()}"), file=sys.stderr)
         return JSONResponse(
             status_code=502,
             content={"error": {"message": "upstream request failed", "type": "upstream_error"}},
@@ -586,7 +587,7 @@ def claude_messages(
             from .schemas import ChatMessage
             updated_messages = standard_messages + [ChatMessage(role="assistant", content=final_text)]
             new_head_hash = router._hash_messages(updated_messages)
-            router.save_state(new_head_hash, reply.conversation_id, session.session_name)
+            router.save_state(new_head_hash, reply.conversation_id, session.session_name, api_key=api_key)
                     
         return message_response(final_text, model)
 
@@ -664,6 +665,25 @@ if os.path.exists("/usr/share/novnc"):
     # We define the websocket route BEFORE the static files mount so it takes precedence
     @app.websocket("/novnc/vnc-ws")
     async def vnc_ws(websocket: WebSocket):
+        expected_pass = os.environ.get("WEB_AUTH_PASSWORD")
+        if not expected_pass:
+            await websocket.close(code=1008)
+            return
+            
+        token = (
+            websocket.query_params.get("token")
+            or websocket.query_params.get("pwd")
+            or websocket.query_params.get("auth")
+            or websocket.query_params.get("password")
+            or websocket.headers.get("X-Admin-Auth")
+            or websocket.cookies.get("admin_pwd")
+            or websocket.cookies.get("token")
+        )
+        if not token or not secrets.compare_digest(token.encode("utf8"), expected_pass.encode("utf8")):
+            print("[Security] Unauthorized attempt to connect to /novnc/vnc-ws")
+            await websocket.close(code=1008)
+            return
+
         # Dynamically accept the subprotocol requested by the client to prevent browser 1006 aborts
         client_protos = websocket.headers.get("sec-websocket-protocol", "")
         protos = [p.strip() for p in client_protos.split(",") if p.strip()]
@@ -721,10 +741,18 @@ if os.path.exists("/usr/share/novnc"):
             done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
             for p in pending:
                 p.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
         finally:
             writer.close()
-            await writer.wait_closed()
-            await websocket.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            try:
+                await websocket.close()
+            except Exception:
+                pass
 
     app.mount("/novnc", StaticFiles(directory="/usr/share/novnc"), name="novnc")
 

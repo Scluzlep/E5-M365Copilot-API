@@ -238,6 +238,28 @@ class BrowserCopilot:
                 setattr(self, attr, None)
         self._page = None
 
+        # Force kill residual browser/driver child process tree as fallback
+        try:
+            import psutil, os
+            current_process = psutil.Process(os.getpid())
+            for child in current_process.children(recursive=True):
+                try:
+                    name = child.name().lower()
+                    if any(x in name for x in ("chrome", "chromium", "msedge", "node")):
+                        child.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except ImportError:
+            import subprocess, sys
+            if sys.platform.startswith("win"):
+                try:
+                    subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(["taskkill", "/F", "/IM", "chromium.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def __enter__(self) -> "BrowserCopilot":
         return self.start()
 

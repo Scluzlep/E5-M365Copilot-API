@@ -11,8 +11,32 @@ import mimetypes
 import threading
 import uuid
 import requests
+import ipaddress
+import socket
+from urllib.parse import urlsplit
+from copilot.utils import mask_token
 
 from .schemas import ChatMessage
+
+def is_safe_url(url: str) -> bool:
+    """Check against SSRF: allow only http/https and block private/loopback/metadata/reserved IPs."""
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme.lower() not in ("http", "https"):
+            return False
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        # Resolve hostname to IP addresses
+        for res in socket.getaddrinfo(hostname, None):
+            ip_str = res[4][0]
+            ip = ipaddress.ip_address(ip_str)
+            if (ip.is_private or ip.is_loopback or ip.is_link_local 
+                or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+                return False
+        return True
+    except Exception:
+        return False
 
 class RemoteImageCache:
     """Bounded LRU cache for remote image URLs fetched via requests."""
@@ -23,36 +47,43 @@ class RemoteImageCache:
         self.lock = threading.Lock()
 
     def get_or_fetch(self, url: str) -> Optional[Tuple[str, bytes]]:
+        if not is_safe_url(url):
+            print(f"[Prompt] Blocked potential SSRF or unsafe URL: {mask_token(url)}")
+            return None
+
         with self.lock:
             if url in self.cache:
                 self.cache.move_to_end(url)
                 return self.cache[url]
         
         try:
-            resp = requests.get(url, timeout=10, stream=True)
-            resp.raise_for_status()
-            
-            content_type = resp.headers.get("content-type", "").split(";")[0].lower().strip()
-            if not content_type.startswith("image/"):
-                guessed = mimetypes.guess_type(url)[0]
-                if guessed and guessed.startswith("image/"):
-                    content_type = guessed
-                else:
-                    content_type = "image/jpeg"
-                    
-            data = b""
-            for chunk in resp.iter_content(chunk_size=8192):
-                data += chunk
-                if len(data) > self.max_bytes_per_image:
-                    return None
-                    
-            with self.lock:
-                self.cache[url] = (content_type, data)
-                while len(self.cache) > self.max_items:
-                    self.cache.popitem(last=False)
-            return content_type, data
+            with requests.get(url, timeout=10, stream=True) as resp:
+                resp.raise_for_status()
+                
+                content_type = resp.headers.get("content-type", "").split(";")[0].lower().strip()
+                if not content_type.startswith("image/"):
+                    if not content_type or content_type == "application/octet-stream":
+                        guessed = mimetypes.guess_type(url)[0]
+                        if guessed and guessed.startswith("image/"):
+                            content_type = guessed
+                        else:
+                            return None  # Drop immediately if not an image!
+                    else:
+                        return None  # Drop immediately if not an image!
+                        
+                data = bytearray()
+                for chunk in resp.iter_content(chunk_size=8192):
+                    data.extend(chunk)
+                    if len(data) > self.max_bytes_per_image:
+                        return None
+                        
+                with self.lock:
+                    self.cache[url] = (content_type, bytes(data))
+                    while len(self.cache) > self.max_items:
+                        self.cache.popitem(last=False)
+                return content_type, bytes(data)
         except Exception as e:
-            print(f"[Prompt] Failed to fetch remote image {url}: {e}")
+            print(f"[Prompt] Failed to fetch remote image {mask_token(url)}: {mask_token(e)}")
             return None
 
 image_cache = RemoteImageCache(max_items=10)
