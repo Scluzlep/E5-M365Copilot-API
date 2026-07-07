@@ -5,7 +5,7 @@ import asyncio
 import secrets
 import os
 
-from fastapi import FastAPI, Depends, BackgroundTasks, HTTPException, status, WebSocket, Request
+from fastapi import FastAPI, Depends, BackgroundTasks, HTTPException, status, WebSocket, Request, Header
 from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -459,8 +459,12 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
 
 
 @app.post("/v1/messages")
-def claude_messages(req: ClaudeMessageRequest, creds: HTTPAuthorizationCredentials = Depends(security)):
-    api_key = creds.credentials if creds else "sk-default"
+def claude_messages(
+    req: ClaudeMessageRequest, 
+    creds: HTTPAuthorizationCredentials = Depends(security),
+    x_api_key: str = Header(None)
+):
+    api_key = x_api_key or (creds.credentials if creds else "sk-default")
     
     from .schemas import ChatMessage
     standard_messages = []
