@@ -24,7 +24,16 @@ class SessionInstance:
         # We assume backward compatibility for 'session'
         if session_name == "session":
             self.session_dir = "session"
-        self.client = CopilotClient(session_dir=self.session_dir)
+            
+        proxy = (
+            os.environ.get("HTTPS_PROXY")
+            or os.environ.get("https_proxy")
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("http_proxy")
+            or os.environ.get("ALL_PROXY")
+            or os.environ.get("all_proxy")
+        )
+        self.client = CopilotClient(session_dir=self.session_dir, proxy=proxy)
         self.lock = threading.Lock()
         self.rate_limiter = TokenBucket(RATE_LIMIT_RPM, RATE_LIMIT_BURST)
         self._health_cache_time = 0
@@ -85,25 +94,31 @@ class SessionInstance:
         if not os.path.exists(token_file):
             return info
             
-        info["status"] = "已配置"
         try:
             with open(token_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 
-                # The most reliable way to get TID, OID, and Email is to decode the JWT access_token
                 token = data.get("access_token", "")
-                if token:
-                    parts = token.split(".")
-                    if len(parts) >= 2:
-                        import base64
-                        padded = parts[1] + '=' * (-len(parts[1]) % 4)
-                        payload = json.loads(base64.urlsafe_b64decode(padded).decode('utf-8'))
-                        info["tid"] = payload.get("tid", "N/A")
-                        info["oid"] = payload.get("oid", "N/A")
-                        info["email"] = payload.get("unique_name", payload.get("upn", payload.get("email", "N/A")))
+                if not token:
+                    info["status"] = "未登录"
+                    return info
+                    
+                login_at = data.get("login_at", data.get("saved_at", 0))
+                import time
+                if time.time() - login_at > 24 * 3600:
+                    info["status"] = "过期/失效"
+                else:
+                    info["status"] = "正常"
 
-                # Fallback to cookies if JWT is missing or invalid
-                # Note: 'cookies' is a dict of name->value, not a list of dicts.
+                parts = token.split(".")
+                if len(parts) >= 2:
+                    import base64
+                    padded = parts[1] + '=' * (-len(parts[1]) % 4)
+                    payload = json.loads(base64.urlsafe_b64decode(padded).decode('utf-8'))
+                    info["tid"] = payload.get("tid", "N/A")
+                    info["oid"] = payload.get("oid", "N/A")
+                    info["email"] = payload.get("unique_name", payload.get("upn", payload.get("email", "N/A")))
+
                 cookies = data.get("cookies", {})
                 if isinstance(cookies, dict):
                     for name, val in cookies.items():
@@ -117,7 +132,7 @@ class SessionInstance:
                             if "@" in decoded and "." in decoded and "{" not in decoded:
                                 info["email"] = decoded
         except Exception:
-            pass
+            info["status"] = "配置无效"
         return info
 
     def get_email(self) -> str:
@@ -139,6 +154,47 @@ class AccountPool:
         self._config_lock = threading.Lock()
         self._session_released_cv = threading.Condition()
         self._load_config()
+        
+        # Start a background daemon thread to proactively refresh tokens approaching 23 hours
+        self._refresh_thread = threading.Thread(target=self._proactive_refresh_loop, daemon=True)
+        self._refresh_thread.start()
+
+    def _proactive_refresh_loop(self):
+        """Background loop checking and renewing tokens approaching 23 hours every 10 minutes."""
+        import time
+        while True:
+            try:
+                # Sleep at the start of loop iteration
+                time.sleep(600)  # Check every 10 minutes
+                
+                # Fetch session names to inspect
+                with self._config_lock:
+                    inspect_sessions = list(self.sessions.items())
+                
+                for name, sess in inspect_sessions:
+                    token_file = os.path.join(sess.session_dir, "token.json")
+                    if not os.path.exists(token_file):
+                        continue
+                    
+                    # Try to acquire the session lock non-blockingly so we don't interfere with active API requests
+                    if sess.lock.acquire(blocking=False):
+                        try:
+                            with open(token_file, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                            try:
+                                login_at = float(data.get("login_at", data.get("saved_at", 0) or 0))
+                            except (ValueError, TypeError):
+                                login_at = 0
+                            if time.time() - login_at > 23 * 3600:
+                                print(f"[Daemon] Session '{name}' is older than 23 hours. Starting proactive headless refresh...")
+                                sess.client._fresh_auth()
+                                print(f"[Daemon] Proactive headless refresh for session '{name}' completed successfully.")
+                        except Exception as err:
+                            print(f"[Daemon] Failed to refresh session '{name}': {err}")
+                        finally:
+                            sess.lock.release()
+            except Exception as e:
+                print(f"[Daemon] Error in proactive refresh loop: {e}")
 
     def _load_config(self):
         """Load API keys mapping from accounts.json, or fallback to default."""
@@ -220,6 +276,15 @@ class AccountPool:
                     shutil.rmtree(sess.session_dir)
                 except Exception as e:
                     print(f"Warning: Failed to delete orphaned session {sess_name}: {e}")
+            try:
+                from copilot.azure_uploader import AzureConfigManager
+                data = AzureConfigManager.load_config()
+                if "session_mappings" in data and sess_name in data["session_mappings"]:
+                    del data["session_mappings"][sess_name]
+                    AzureConfigManager.save_config(data)
+                    print(f"[Pool] Cleaned up Azure mapping for orphaned session: {sess_name}")
+            except Exception as ex:
+                print(f"Warning: Failed to clean up Azure mapping for {sess_name}: {ex}")
 
     def remove_api_key(self, api_key: str):
         with self._config_lock:

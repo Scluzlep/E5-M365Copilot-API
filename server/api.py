@@ -434,27 +434,38 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                 # Try up to 3 different sessions from the pool if auth fails
                 max_retries = 3
                 for attempt in range(max_retries):
-                    with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
-                        try:
-                            if preferred_session and session.session_name != preferred_session:
-                                # We fell back to a different account; Copilot conversation IDs are tied to accounts,
-                                # so we must start a fresh conversation instead of failing.
-                                conversation_id = None
-                                
-                            print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
-                            yield from _stream(session, prompt, model, req.messages, conversation_id, plugins, files=files, api_key=api_key)
-                            return  # Success, exit retry loop
-                        except RuntimeError as e:
-                            if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
-                                print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
-                                # Force this session to be unhealthy by removing its token, so the next acquire picks a different session
-                                session.client.invalidate_auth()
-                                # Clear preferred_session so pool.acquire_session is free to pick the next best healthy session
-                                preferred_session = None
-                                if attempt == max_retries - 1:
-                                    raise
-                                continue
-                            raise
+                    try:
+                        with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                            try:
+                                if preferred_session and session.session_name != preferred_session:
+                                    # We fell back to a different account; Copilot conversation IDs are tied to accounts,
+                                    # so we must start a fresh conversation instead of failing.
+                                    conversation_id = None
+                                    
+                                print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
+                                yield from _stream(session, prompt, model, req.messages, conversation_id, plugins, files=files, api_key=api_key)
+                                return  # Success, exit retry loop
+                            except RuntimeError as e:
+                                if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
+                                    print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
+                                    # Force this session to be unhealthy by removing its token, so the next acquire picks a different session
+                                    session.client.invalidate_auth()
+                                    # Clear preferred_session so pool.acquire_session is free to pick the next best healthy session
+                                    preferred_session = None
+                                    if attempt == max_retries - 1:
+                                        raise
+                                    continue
+                                raise
+                    except Exception as e:
+                        if attempt == max_retries - 1:
+                            import time
+                            from .openai_format import sse_event, stream_chunk
+                            cid = conversation_id or "err-chatcmpl"
+                            created = int(time.time())
+                            yield sse_event(stream_chunk(cid, created, model or "copilot", {"content": f"\n[error: {str(e)}]"}, finish="error"))
+                            yield "data: [DONE]\n\n"
+                            return
+                        continue
     
             return StreamingResponse(
                 stream_wrapper(),
@@ -565,23 +576,40 @@ def claude_messages(
             nonlocal preferred_session, conversation_id
             max_retries = 3
             for attempt in range(max_retries):
-                with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
-                    try:
-                        if preferred_session and session.session_name != preferred_session:
-                            conversation_id = None
-                            
-                        print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
-                        yield from _stream_claude(session, prompt, model, standard_messages, plugins=None, conversation_id=conversation_id, files=files, api_key=api_key)
+                try:
+                    with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                        try:
+                            if preferred_session and session.session_name != preferred_session:
+                                conversation_id = None
+                                
+                            print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
+                            yield from _stream_claude(session, prompt, model, standard_messages, plugins=None, conversation_id=conversation_id, files=files, api_key=api_key)
+                            return
+                        except RuntimeError as e:
+                            if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
+                                print(f"[API] Claude session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
+                                session.client.invalidate_auth()
+                                preferred_session = None
+                                if attempt == max_retries - 1:
+                                    raise
+                                continue
+                            raise
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        from .claude_format import (
+                            stream_message_start, stream_content_block_start,
+                            stream_content_block_delta, stream_content_block_stop,
+                            stream_message_delta, stream_message_stop, new_msg_id
+                        )
+                        msg_id = new_msg_id()
+                        yield stream_message_start(msg_id, model or "copilot")
+                        yield stream_content_block_start(index=0)
+                        yield stream_content_block_delta(index=0, text=f"\n[error: {str(e)}]")
+                        yield stream_content_block_stop(index=0)
+                        yield stream_message_delta(stop_reason="error")
+                        yield stream_message_stop()
                         return
-                    except RuntimeError as e:
-                        if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
-                            print(f"[API] Claude session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
-                            session.client.invalidate_auth()
-                            preferred_session = None
-                            if attempt == max_retries - 1:
-                                raise
-                            continue
-                        raise
+                    continue
 
         return StreamingResponse(
             stream_wrapper(),
@@ -670,7 +698,16 @@ def login_session(session_name: str):
         try:
             # Ensure VNC is used if DISPLAY is set, else headless=False locally
             from copilot.browser import BrowserCopilot
-            browser = BrowserCopilot(profile_dir=f"sessions/{session_name}/profile", headless=False)
+            import os
+            proxy = (
+                os.environ.get("HTTPS_PROXY")
+                or os.environ.get("https_proxy")
+                or os.environ.get("HTTP_PROXY")
+                or os.environ.get("http_proxy")
+                or os.environ.get("ALL_PROXY")
+                or os.environ.get("all_proxy")
+            )
+            browser = BrowserCopilot(profile_dir=f"sessions/{session_name}/profile", headless=False, proxy=proxy)
             # The user interacts with VNC to login
             browser.login(path=f"sessions/{session_name}/token.json")
         except Exception as e:

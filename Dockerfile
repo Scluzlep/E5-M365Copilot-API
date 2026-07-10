@@ -28,6 +28,7 @@ ENV DISPLAY=:99
 ENV RESOLUTION=1280x800x24
 ENV HOST=0.0.0.0
 ENV PORT=8000
+ENV PYTHONUNBUFFERED=1
 
 # Make entrypoint executable
 RUN chmod +x /app/entrypoint.sh

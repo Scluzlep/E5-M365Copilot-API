@@ -241,10 +241,21 @@
             <div id="accounts-container">加载中...</div>
 
             <h3 style="margin-top: 30px;">添加新映射 (Add New Mapping)</h3>
-            <input type="text" id="new-apikey" placeholder="请输入 API Key">
-            <input type="text" id="new-sessions" placeholder="请输入关联 Session (逗号分隔)">
-            <br>
-            <button class="primary-btn" onclick="addAccount()">添加/追加映射</button>
+            <div class="form-group">
+                <label class="form-label">选择或新建 API Key</label>
+                <select id="apikey-select" class="form-control" onchange="onApiKeySelectChange()">
+                    <option value="">[+ 新建 API Key]</option>
+                </select>
+            </div>
+            <div class="form-group" id="new-apikey-group">
+                <label class="form-label">新 API Key</label>
+                <input type="text" id="new-apikey" class="form-control" placeholder="请输入 API Key">
+            </div>
+            <div class="form-group">
+                <label class="form-label">关联 Session (多个以逗号分隔)</label>
+                <input type="text" id="new-sessions" class="form-control" placeholder="例如: session1, session2">
+            </div>
+            <button class="primary-btn" style="width: 100%; margin-top: 5px;" onclick="addAccount()">添加/追加映射</button>
         </div>
 
         <!-- VNC Panel -->
@@ -390,6 +401,25 @@
             const data = await res.json();
             window.accountsData = data;
             if (typeof updateBindSessionSelect === 'function') updateBindSessionSelect();
+            
+            // Update apikey-select dropdown
+            const select = document.getElementById('apikey-select');
+            const savedVal = select.value;
+            select.innerHTML = '<option value="">[+ 新建 API Key]</option>';
+            if (data.api_keys) {
+                for (const key of Object.keys(data.api_keys)) {
+                    const opt = document.createElement('option');
+                    opt.value = key;
+                    opt.innerText = key;
+                    select.appendChild(opt);
+                }
+            }
+            select.value = savedVal;
+            if (select.value !== savedVal) {
+                select.value = '';
+            }
+            onApiKeySelectChange();
+
             const container = document.getElementById('accounts-container');
             container.innerHTML = '';
 
@@ -410,7 +440,7 @@
 
                 sessions.forEach(s => {
                     const info = data.sessions_info ? data.sessions_info[s] : { status: "未知" };
-                    const isConfigured = info && info.status === "已配置";
+                    const isConfigured = info && (info.status === "已配置" || info.status === "正常");
 
                     const tag = document.createElement('div');
                     tag.className = 'session-tag';
@@ -444,6 +474,20 @@
             }
         }
 
+        function onApiKeySelectChange() {
+            const selectVal = document.getElementById('apikey-select').value;
+            const newGroup = document.getElementById('new-apikey-group');
+            const newSessions = document.getElementById('new-sessions');
+            if (selectVal) {
+                newGroup.style.display = 'none';
+                const sessions = window.accountsData && window.accountsData.api_keys ? window.accountsData.api_keys[selectVal] : [];
+                newSessions.value = sessions.join(', ');
+            } else {
+                newGroup.style.display = 'block';
+                newSessions.value = '';
+            }
+        }
+
         function copyKey(key) {
             navigator.clipboard.writeText(key).then(() => {
                 alert('已复制 Key: ' + key);
@@ -454,16 +498,24 @@
             if (!confirm(`确定要删除 API Key "${key}" 吗？`)) return;
             await fetch(`/api/accounts/${encodeURIComponent(key)}`, { method: 'DELETE' });
             loadAccounts();
+            loadAzureConfig();
         }
 
         async function deleteSession(key, sessionName) {
             if (!confirm(`确定要从 "${key}" 中移除 session "${sessionName}" 吗？`)) return;
             await fetch(`/api/accounts/${encodeURIComponent(key)}/${encodeURIComponent(sessionName)}`, { method: 'DELETE' });
             loadAccounts();
+            loadAzureConfig();
         }
 
         async function addAccount() {
-            const key = document.getElementById('new-apikey').value.trim();
+            const selectVal = document.getElementById('apikey-select').value;
+            let key = "";
+            if (selectVal) {
+                key = selectVal;
+            } else {
+                key = document.getElementById('new-apikey').value.trim();
+            }
             const sessions = document.getElementById('new-sessions').value.split(',').map(s => s.trim()).filter(s => s);
             if (!key || !sessions.length) return alert('请提供 API Key 和至少一个 session');
 
@@ -476,6 +528,7 @@
             document.getElementById('new-apikey').value = '';
             document.getElementById('new-sessions').value = '';
             loadAccounts();
+            loadAzureConfig();
         }
 
         async function launchVnc(sessionName) {

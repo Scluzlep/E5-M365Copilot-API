@@ -194,6 +194,8 @@ class BrowserCopilot:
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     f"--lang={US_LOCALE}",
+                    "--window-position=0,0",
+                    "--window-size=1280,800",
                 ],
                 ignore_default_args=["--enable-automation"],
             )
@@ -223,6 +225,12 @@ class BrowserCopilot:
             # wait would always time out. A short fixed settle is enough.
             self._page.wait_for_timeout(2000)
         except PlaywrightError as exc:
+            if not self.headless:
+                print(f"[Browser] VNC browser launch failed: {exc}. Keeping browser window open for 60s for troubleshooting...")
+                try:
+                    time.sleep(60)
+                except Exception:
+                    pass
             self.close()
             raise ConnectionError(f"Failed to start browser: {exc}") from exc
         return self
@@ -342,6 +350,7 @@ class BrowserCopilot:
             print("Signed in — finishing setup (warm-up)...")
             log("warming up to mint the chat token")
             try:
+                self._ensure_on_chat()
                 self._warmup_replied = False
                 if self._send_warmup():
                     self._await_warmup_reply(timeout=max(30, int(deadline - time.time())))
@@ -357,7 +366,7 @@ class BrowserCopilot:
         # Snapshot for the headless curl_cffi path.
         auth: dict = {}
         try:
-            auth = self.export_auth(path=path, stamp=time.time())
+            auth = self.export_auth(path=path, stamp=time.time(), login_stamp=time.time())
             log(f"auth snapshot saved to {path} (access_token={'yes' if auth.get('access_token') else 'no'}"
                 f", identity={auth.get('identity_type')})")
             print(f"Auth snapshot saved to {path}")
@@ -570,6 +579,7 @@ class BrowserCopilot:
         if not self.signed_in():
             return None
 
+        self._ensure_on_chat()
         if not self._send_warmup():
             return self.access_token()
 
@@ -605,20 +615,54 @@ class BrowserCopilot:
             if any(domain in c.get("domain", "") for domain in ("microsoft.com", "microsoftonline.com", "office.com", "office365.com", "live.com", "bing.com"))
         }
 
-    def export_auth(self, path: str = DEFAULT_AUTH_FILE, stamp: Optional[float] = None) -> dict:
+    def _ensure_on_chat(self) -> None:
+        """Force navigation to Copilot chat page if currently on a different page."""
+        if self._page:
+            try:
+                current_url = self._page.url
+                if "/chat" not in current_url:
+                    print(f"[Browser] Redirecting from {current_url} to {COPILOT_URL}...")
+                    self._page.goto(COPILOT_URL, wait_until="domcontentloaded")
+                    self._page.wait_for_timeout(2000)
+            except Exception:
+                pass
+
+    def export_auth(self, path: str = DEFAULT_AUTH_FILE, stamp: Optional[float] = None, login_stamp: Optional[float] = None) -> dict:
         """Save the chat token, graph token, and Microsoft cookies to ``path``.
 
         Returns the snapshot dict."""
         self._ensure_started()
+        token = self.access_token()
+        if not token:
+            dest = Path(path)
+            if dest.exists():
+                try:
+                    dest.unlink()
+                except Exception:
+                    pass
+            raise RuntimeError("Failed to capture a valid Microsoft Copilot access token.")
+
+        # Try to read existing login_at from path
+        existing_login_at = None
+        dest = Path(path)
+        if dest.exists():
+            try:
+                existing_data = json.loads(dest.read_text(encoding="utf-8"))
+                existing_login_at = existing_data.get("login_at")
+            except Exception:
+                pass
+
+        login_at = login_stamp or existing_login_at or stamp or time.time()
+
         auth = {
             "cookies": self.cookies(),
-            "access_token": self.access_token(),
+            "access_token": token,
             "graph_token": self.graph_token(),
             "refresh_token": getattr(self, "_captured_refresh_token", None),
             "identity_type": getattr(self, "_captured_identity_type", None),
             "saved_at": stamp or time.time(),
+            "login_at": login_at,
         }
-        dest = Path(path)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(json.dumps(auth, indent=2), encoding="utf-8")
         return auth

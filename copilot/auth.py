@@ -66,7 +66,19 @@ def load_auth(
         except Exception:
             pass
 
-    if rt:
+    # Skip API refresh if the session login is older than 23 hours to prevent SPA token expiration error
+    is_expired_23h = False
+    if cached:
+        try:
+            login_at = float(cached.get("login_at", cached.get("saved_at", 0) or 0))
+            if time.time() - login_at > 23 * 3600:
+                is_expired_23h = True
+                print("[Auth] Session is older than 23 hours. Forcing BrowserCopilot headless renewal instead of API refresh...")
+        except (ValueError, TypeError):
+            is_expired_23h = True
+            print("[Auth] Invalid login_at/saved_at timestamp. Forcing headless browser renewal...")
+
+    if rt and not is_expired_23h:
         import requests
         
         # Use OfficeHome Client ID to mint Copilot Scope
@@ -90,6 +102,8 @@ def load_auth(
                     cached["access_token"] = token_json["access_token"]
                     cached["refresh_token"] = token_json.get("refresh_token", rt) # Store the new RT!
                     cached["saved_at"] = time.time()
+                    if "login_at" not in cached:
+                        cached["login_at"] = cached.get("saved_at", time.time())
                     p.write_text(json.dumps(cached, indent=2), encoding="utf-8")
                     print("Token refreshed via Pure API!")
                     return cached
@@ -106,7 +120,7 @@ def load_auth(
         bot.start()
         token = bot.acquire_chat_token()
         if token and not bot.region_blocked():
-            return bot.export_auth(path=path, stamp=time.time())
+            return bot.export_auth(path=path, stamp=time.time(), login_stamp=time.time())
     finally:
         bot.close()
 
