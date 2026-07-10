@@ -172,6 +172,10 @@ class AccountPool:
                     inspect_sessions = list(self.sessions.items())
                 
                 for name, sess in inspect_sessions:
+                    with self._config_lock:
+                        if name not in self.sessions:
+                            continue
+                            
                     token_file = os.path.join(sess.session_dir, "token.json")
                     if not os.path.exists(token_file):
                         continue
@@ -179,6 +183,9 @@ class AccountPool:
                     # Try to acquire the session lock non-blockingly so we don't interfere with active API requests
                     if sess.lock.acquire(blocking=False):
                         try:
+                            with self._config_lock:
+                                if name not in self.sessions:
+                                    continue
                             with open(token_file, "r", encoding="utf-8") as f:
                                 data = json.load(f)
                             try:
@@ -271,11 +278,13 @@ class AccountPool:
                 
         for sess_name in to_remove:
             sess = self.sessions.pop(sess_name, None)
-            if sess and os.path.exists(sess.session_dir):
-                try:
-                    shutil.rmtree(sess.session_dir)
-                except Exception as e:
-                    print(f"Warning: Failed to delete orphaned session {sess_name}: {e}")
+            if sess:
+                with sess.lock:
+                    if os.path.exists(sess.session_dir):
+                        try:
+                            shutil.rmtree(sess.session_dir)
+                        except Exception as e:
+                            print(f"Warning: Failed to delete orphaned session {sess_name}: {e}")
             try:
                 from copilot.azure_uploader import AzureConfigManager
                 data = AzureConfigManager.load_config()

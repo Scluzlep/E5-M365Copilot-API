@@ -457,6 +457,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                                     continue
                                 raise
                     except Exception as e:
+                        preferred_session = None
                         if attempt == max_retries - 1:
                             import time
                             from .openai_format import sse_event, stream_chunk
@@ -476,23 +477,36 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
             max_retries = 3
             reply = None
             for attempt in range(max_retries):
-                with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
-                    try:
-                        if preferred_session and session.session_name != preferred_session:
-                            conversation_id = None
-                        
-                        print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
-                        reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=plugins, e5_attachments=files)
-                        break  # Success
-                    except RuntimeError as e:
-                        if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
-                            print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
-                            session.client.invalidate_auth()
-                            preferred_session = None
-                            if attempt == max_retries - 1:
-                                raise
-                            continue
-                        raise
+                try:
+                    with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                        try:
+                            if preferred_session and session.session_name != preferred_session:
+                                # We fell back to a different account; Copilot conversation IDs are tied to accounts,
+                                # so we must start a fresh conversation instead of failing.
+                                conversation_id = None
+                                
+                            print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
+                            reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=plugins, e5_attachments=files)
+                            break  # Success
+                        except RuntimeError as e:
+                            if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
+                                print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
+                                # Force this session to be unhealthy by removing its token, so the next acquire picks a different session
+                                session.client.invalidate_auth()
+                                # Clear preferred_session so pool.acquire_session is free to pick the next best healthy session
+                                preferred_session = None
+                                if attempt == max_retries - 1:
+                                    raise
+                                continue
+                            raise
+                except Exception as e:
+                    preferred_session = None
+                    if attempt == max_retries - 1:
+                        return JSONResponse(
+                            status_code=500,
+                            content={"error": {"message": f"Failed to complete request: {str(e)}", "type": "server_error"}}
+                        )
+                    continue
             
             if reply is None:
                 raise Exception("Failed to acquire reply after retries")
@@ -595,6 +609,7 @@ def claude_messages(
                                 continue
                             raise
                 except Exception as e:
+                    preferred_session = None
                     if attempt == max_retries - 1:
                         from .claude_format import (
                             stream_message_start, stream_content_block_start,
@@ -620,23 +635,29 @@ def claude_messages(
         max_retries = 3
         reply = None
         for attempt in range(max_retries):
-            with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
-                try:
-                    if preferred_session and session.session_name != preferred_session:
-                        conversation_id = None
-                        
-                    print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
-                    reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=None, e5_attachments=files)
-                    break
-                except RuntimeError as e:
-                    if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
-                        print(f"[API] Claude session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
-                        session.client.invalidate_auth()
-                        preferred_session = None
-                        if attempt == max_retries - 1:
-                            raise
-                        continue
-                    raise
+            try:
+                with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+                    try:
+                        if preferred_session and session.session_name != preferred_session:
+                            conversation_id = None
+                            
+                        print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
+                        reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=None, e5_attachments=files)
+                        break
+                    except RuntimeError as e:
+                        if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
+                            print(f"[API] Claude session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
+                            session.client.invalidate_auth()
+                            preferred_session = None
+                            if attempt == max_retries - 1:
+                                raise
+                            continue
+                        raise
+            except Exception as e:
+                preferred_session = None
+                if attempt == max_retries - 1:
+                    return JSONResponse(status_code=500, content={"error": {"message": f"Failed to complete request: {str(e)}", "type": "server_error"}})
+                continue
                     
         if reply is None:
             return JSONResponse(status_code=500, content={"error": {"message": "upstream request failed", "type": "upstream_error"}})

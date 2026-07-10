@@ -365,16 +365,24 @@ class BrowserCopilot:
 
         # Snapshot for the headless curl_cffi path.
         auth: dict = {}
+        success = False
         try:
             auth = self.export_auth(path=path, stamp=time.time(), login_stamp=time.time())
             log(f"auth snapshot saved to {path} (access_token={'yes' if auth.get('access_token') else 'no'}"
                 f", identity={auth.get('identity_type')})")
             print(f"Auth snapshot saved to {path}")
+            success = True
         except Exception as exc:
             log(f"could not snapshot auth: {exc}")
             print(f"(could not snapshot auth: {exc})")
 
         log("closing browser")
+        if not success and not self.headless:
+            print("[Browser] Login failed or token capture failed. Keeping browser open for 60s for troubleshooting in VNC...")
+            try:
+                time.sleep(60)
+            except Exception:
+                pass
         self.close()
         print(f"Session saved to {self.profile_dir}")
         return auth
@@ -634,12 +642,6 @@ class BrowserCopilot:
         self._ensure_started()
         token = self.access_token()
         if not token:
-            dest = Path(path)
-            if dest.exists():
-                try:
-                    dest.unlink()
-                except Exception:
-                    pass
             raise RuntimeError("Failed to capture a valid Microsoft Copilot access token.")
 
         # Try to read existing login_at from path
