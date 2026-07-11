@@ -11,6 +11,7 @@ import sys
 import time
 import uuid
 from select import select
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
@@ -500,11 +501,38 @@ class Copilot(AbstractProvider):
                     "target": "chat",
                     "type": 4,
                 }
-                if resolved_gpt_id:
+                # Ensure Claude or native reasoning tones are NEVER overridden to GPT-5 by threadLevelGptId
+                if resolved_gpt_id and not (resolved_mode and resolved_mode.startswith("Claude_")):
                     e5_payload["arguments"][0]["threadLevelGptId"] = {"gptId": resolved_gpt_id}
-                wss.send((json.dumps(e5_payload) + "\x1e").encode("utf-8"), CurlWsFlag.TEXT)
+                elif "threadLevelGptId" in e5_payload["arguments"][0]:
+                    e5_payload["arguments"][0].pop("threadLevelGptId", None)
+
+                # Build mandatory Metrics frame in same send (`\x1e` delimited) as discovered by opencode-m365
+                now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                metrics_frame = {
+                    "arguments": [
+                        {
+                            "Timestamps": {
+                                "ConnectionStart": now_iso,
+                                "UserInputStart": now_iso,
+                                "ConnectionEstablished": now_iso,
+                                "UserInputSubmit": now_iso,
+                            }
+                        }
+                    ],
+                    "target": "Metrics",
+                    "type": 1,
+                }
+                combined_payload = json.dumps(e5_payload) + "\x1e" + json.dumps(metrics_frame) + "\x1e"
+                wss.send(combined_payload.encode("utf-8"), CurlWsFlag.TEXT)
                 yield from self._read_e5_stream(wss, timeout)
             finally:
+                try:
+                    # Send STOP frame (`type: 1, target: "stop", invocationId: "1"`) to cleanly cancel partial turn if aborted
+                    stop_frame = json.dumps({"arguments": [{}], "invocationId": "1", "target": "stop", "type": 1}) + "\x1e"
+                    wss.send(stop_frame.encode("utf-8"), CurlWsFlag.TEXT)
+                except Exception:
+                    pass
                 try:
                     wss.close()
                 except Exception:
@@ -559,6 +587,8 @@ class Copilot(AbstractProvider):
                         messages = arg.get("messages", [])
                         if messages and isinstance(messages, list) and isinstance(messages[0], dict):
                             msg_obj = messages[0]
+                            if msg_obj.get("messageType") == "Disengaged":
+                                raise RuntimeError("Copilot Disengaged: backend disconnected session.")
                             server_text = msg_obj.get("text", "")
                             
                             if msg_obj.get("addToChainOfThought") or msg_obj.get("contentType") == "Thinking" or msg_obj.get("messageType") == "Progress":
@@ -580,7 +610,8 @@ class Copilot(AbstractProvider):
                                     yield {"thought": combined + "\n\n"}
                                 continue
 
-                            msg_obj = arg.get("messages", [{}])[0]
+                            if msg_obj.get("messageType") == "Disengaged":
+                                raise RuntimeError("Copilot Disengaged: backend disconnected session.")
                             
                             # Extract citations from sourceAttributions
                             source_attrs = msg_obj.get("sourceAttributions", [])
@@ -643,6 +674,12 @@ class Copilot(AbstractProvider):
                 elif msg_type == 2:
                     if msg.get("error"):
                         raise RuntimeError(f"Copilot E5 error: {msg['error']}")
+                    item = msg.get("item") or {}
+                    if item.get("result", {}).get("value") == "Disengaged":
+                        raise RuntimeError("Copilot Disengaged: backend disconnected session.")
+                    for ms in item.get("messages", []):
+                        if isinstance(ms, dict) and ms.get("messageType") == "Disengaged":
+                            raise RuntimeError("Copilot Disengaged: backend disconnected session.")
                     return
                 elif msg_type == 7:
                     return

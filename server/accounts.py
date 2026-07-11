@@ -368,6 +368,12 @@ class AccountPool:
                         try:
                             # Trigger Pure API token renewal (with browser fallback) while locked
                             sess.client._fresh_auth()
+                            sess._health_cache_time = 0
+                            if not sess.is_healthy():
+                                sess.lock.release()
+                                with self._session_released_cv:
+                                    self._session_released_cv.notify_all()
+                                return False
                         except Exception as e:
                             print(f"[Pool] Failed to renew session {sess.session_name}: {mask_token(e)}")
                             sess.lock.release()

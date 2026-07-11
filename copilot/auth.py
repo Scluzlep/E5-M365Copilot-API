@@ -18,6 +18,96 @@ DEFAULT_AUTH_FILE = f"{SESSION_DIR}/token.json"
 AUTH_MAX_AGE = 50 * 60
 
 
+def reauth_with_sso(cached: dict, path: str = DEFAULT_AUTH_FILE) -> Optional[dict]:
+    """Perform silent re-authentication using stored SSO cookies (ESTSAUTH / ESTSAUTHPERSISTENT).
+
+    This implements M365Bridge's reauthWithSSO logic to bypass SPA 24h refresh token limits without launching Chromium.
+    """
+    sso_cookies = cached.get("sso_cookies") or cached.get("cookies") or {}
+    cookie_parts = [f"{k}={v}" for k, v in sso_cookies.items() if k in ("ESTSAUTH", "ESTSAUTHPERSISTENT")]
+    if not cookie_parts:
+        return None
+
+    import os
+    import base64
+    import hashlib
+    import urllib.parse
+    import requests
+
+    print("[Auth] Attempting silent SSO cookie reauth (M365Bridge pattern)...")
+    verifier_bytes = os.urandom(32)
+    verifier = base64.urlsafe_b64encode(verifier_bytes).rstrip(b"=").decode("ascii")
+    challenge_bytes = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(challenge_bytes).rstrip(b"=").decode("ascii")
+
+    office_client = "4765445b-32c6-49b0-83e6-1d93765276ca"
+    redirect_uri = "https://m365.cloud.microsoft/spalanding"
+    scope = "https://substrate.office.com/sydney/.default openid profile offline_access"
+
+    params = {
+        "client_id": office_client,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "scope": scope,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "sso_reload": "True",
+    }
+    authorize_url = f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?{urllib.parse.urlencode(params)}"
+    headers = {"Cookie": "; ".join(cookie_parts)}
+
+    try:
+        session = requests.Session()
+        current_url = authorize_url
+        auth_code = None
+
+        for _ in range(10):
+            resp = session.get(current_url, headers=headers, allow_redirects=False, timeout=10)
+            loc = resp.headers.get("Location")
+            if not loc:
+                break
+            if "code=" in loc:
+                parsed = urllib.parse.urlparse(loc)
+                qs = urllib.parse.parse_qs(parsed.query or parsed.fragment)
+                if "code" in qs and qs["code"]:
+                    auth_code = qs["code"][0]
+                    break
+            current_url = loc
+
+        if not auth_code:
+            print("[Auth] Silent SSO cookie exchange did not yield auth code.")
+            return None
+
+        token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+        token_data = {
+            "grant_type": "authorization_code",
+            "client_id": office_client,
+            "code": auth_code,
+            "redirect_uri": redirect_uri,
+            "code_verifier": verifier,
+        }
+        token_headers = {
+            "Origin": "https://www.office.com",
+            "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+            "Cookie": "; ".join(cookie_parts),
+        }
+        token_resp = session.post(token_url, data=token_data, headers=token_headers, timeout=10)
+        if token_resp.status_code == 200:
+            token_json = token_resp.json()
+            if "access_token" in token_json:
+                cached["access_token"] = token_json["access_token"]
+                cached["refresh_token"] = token_json.get("refresh_token", cached.get("refresh_token"))
+                cached["saved_at"] = time.time()
+                cached["login_at"] = time.time()
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                Path(path).write_text(json.dumps(cached, indent=2), encoding="utf-8")
+                print("[Auth] Successfully refreshed access token via silent SSO cookies!")
+                return cached
+    except Exception as e:
+        print(f"[Auth] Silent SSO cookie exchange error: {e}")
+    return None
+
+
 def load_auth(
     path: str = DEFAULT_AUTH_FILE,
     profile_dir: str = DEFAULT_PROFILE_DIR,
@@ -73,10 +163,10 @@ def load_auth(
             login_at = float(cached.get("login_at", cached.get("saved_at", 0) or 0))
             if time.time() - login_at > 23 * 3600:
                 is_expired_23h = True
-                print("[Auth] Session is older than 23 hours. Forcing BrowserCopilot headless renewal instead of API refresh...")
+                print("[Auth] Session is older than 23 hours. Forcing silent SSO cookie exchange or BrowserCopilot headless renewal...")
         except (ValueError, TypeError):
             is_expired_23h = True
-            print("[Auth] Invalid login_at/saved_at timestamp. Forcing headless browser renewal...")
+            print("[Auth] Invalid login_at/saved_at timestamp. Forcing renewal...")
 
     if rt and not is_expired_23h:
         import requests
@@ -104,17 +194,23 @@ def load_auth(
                     cached["saved_at"] = time.time()
                     if "login_at" not in cached:
                         cached["login_at"] = cached.get("saved_at", time.time())
+                    p.parent.mkdir(parents=True, exist_ok=True)
                     p.write_text(json.dumps(cached, indent=2), encoding="utf-8")
                     print("Token refreshed via Pure API!")
                     return cached
             else:
                 print(f"Pure API refresh rejected: {resp.text}")
         except Exception as e:
-            print(f"Pure API refresh request failed: {e}. Falling back to BrowserCopilot...")
+            print(f"Pure API refresh request failed: {e}. Falling back to SSO/BrowserCopilot...")
+
+    # Try silent SSO reauth before launching Chromium
+    sso_result = reauth_with_sso(cached, path=path)
+    if sso_result:
+        return sso_result
 
     from .browser import BrowserCopilot
 
-    # Fallback to headless BrowserCopilot if API refresh failed (or no cookies)
+    # Fallback to headless BrowserCopilot if API refresh and SSO reauth failed (or no cookies)
     bot = BrowserCopilot(profile_dir=profile_dir, headless=True, proxy=proxy)
     try:
         bot.start()

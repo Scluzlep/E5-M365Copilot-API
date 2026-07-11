@@ -343,21 +343,57 @@ def content_text(content: Optional[Union[str, List[Any]]]) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def messages_to_prompt(messages: List[ChatMessage]) -> str:
-    """Flatten an OpenAI ``messages`` array into a single Copilot prompt."""
-    system = "\n\n".join(
-        content_text(m.content) for m in messages if m.role == "system" and m.content
-    )
-    convo = [m for m in messages if m.role != "system"]
+def _msg_attr(m, attr, default=None):
+    if isinstance(m, dict):
+        return m.get(attr, default)
+    return getattr(m, attr, default)
 
-    if len(convo) == 1 and convo[0].role == "user":
-        body = content_text(convo[0].content)  # simple single-turn request
+
+def messages_to_prompt(messages: List[Union[ChatMessage, dict]]) -> str:
+    """Flatten an OpenAI ``messages`` array into a single Copilot prompt, with tool calling support."""
+    system = "\n\n".join(
+        content_text(_msg_attr(m, "content")) for m in messages if _msg_attr(m, "role") == "system" and _msg_attr(m, "content")
+    )
+    convo = [m for m in messages if _msg_attr(m, "role") != "system"]
+
+    if len(convo) == 1 and _msg_attr(convo[0], "role") == "user":
+        body = content_text(_msg_attr(convo[0], "content"))  # simple single-turn request
     else:
         lines = []
         for m in convo:
-            label = "User" if m.role == "user" else "Assistant"
-            lines.append(f"{label}: {content_text(m.content)}")
-        lines.append("Assistant:")  # cue Copilot to continue
+            role = _msg_attr(m, "role", "")
+            content = _msg_attr(m, "content")
+            if role == "tool":
+                tid = _msg_attr(m, "tool_call_id", "") or "unknown"
+                lines.append(f"[Assistant Tool Call Output] (id: {tid}):\n{content_text(content)}")
+            elif role == "assistant":
+                t_calls = _msg_attr(m, "tool_calls")
+                if t_calls:
+                    tc_texts = []
+                    for tc in t_calls:
+                        fn = _msg_attr(tc, "function", {}) if not isinstance(tc, dict) else tc.get("function", {})
+                        fname = _msg_attr(fn, "name", "") if not isinstance(fn, dict) else fn.get("name", "")
+                        fargs = _msg_attr(fn, "arguments", "") if not isinstance(fn, dict) else fn.get("arguments", "")
+                        tc_texts.append(f"Assistant called tool: {fname}({fargs})")
+                    txt = content_text(content)
+                    if txt:
+                        tc_texts.insert(0, f"Assistant: {txt}")
+                    lines.append("\n".join(tc_texts))
+                else:
+                    lines.append(f"Assistant: {content_text(content)}")
+            else:
+                label = "User" if role == "user" else role.capitalize() if role else "User"
+                lines.append(f"{label}: {content_text(content)}")
+
+        if convo and _msg_attr(convo[-1], "role") == "tool":
+            lines.append(
+                "\n[System Guidance]\n"
+                "The tool action you requested has been executed and the result is provided above inside [Assistant Tool Call Output].\n"
+                "Please analyze the tool result above and formulate your final response to the user. "
+                "If more tool actions are needed, emit the next tool_call; otherwise give the user your final answer."
+            )
+        else:
+            lines.append("Assistant:")  # cue Copilot to continue
         body = "\n".join(lines)
 
     if system and body:

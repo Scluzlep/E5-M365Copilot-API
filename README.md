@@ -1,359 +1,328 @@
+# E5 M365 Copilot API: Enterprise-Grade Substrate Bridge & Dual-Protocol Gateway
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-00a393.svg)](https://fastapi.tiangolo.com)
+[![OpenAI & Claude Compatible](https://img.shields.io/badge/Protocol-OpenAI%20%7C%20Anthropic%20Claude-purple.svg)]()
 
-# E5 M365 Copilot API: a free LLM API powered by Microsoft Copilot
+**Turn your free Microsoft Copilot / E5 Substrate account into an enterprise-grade, highly concurrent, dual-protocol LLM gateway.**
 
-![E5 M365 Copilot API — a free, OpenAI-compatible API for your Microsoft Copilot account](assets/windows-copilot-api-banner.png)
-
-**Using your own Microsoft Copilot account.** No API key, no credits, no paid plan: it turns the free chat at [copilot.microsoft.com](https://copilot.microsoft.com) into an API you can call from code.
-
-You can use it in two ways:
-
-- 🐍 **As a Python library:** just call `client.chat("Hi")`. Supports streaming and multi-turn conversations.
-- 🔌 **As a local OpenAI-compatible API:** runs a server at `http://localhost:8000/v1` that speaks the OpenAI format, so the official `openai` SDK (and any OpenAI-compatible app) works as a drop-in, with `localhost` in place of OpenAI.
-
-You sign in once in a browser with your Microsoft **or Google** account; your session is saved and refreshed automatically after that.
-
-> **Unofficial project.** Not affiliated with or endorsed by Microsoft. It automates the Microsoft 365 Copilot (E5 Substrate) web experience for authorized use, so use it responsibly and within Microsoft's terms.
+**E5 M365 Copilot API** is an advanced reverse-engineered bridge that transforms [copilot.microsoft.com](https://copilot.microsoft.com) and Microsoft 365 Substrate into a standard **OpenAI (`/v1/chat/completions`)** and **Anthropic Claude (`/v1/messages`)** compatible API. Designed for high concurrency, multi-tenant isolation, and zero-maintenance operation, it incorporates advanced reverse-engineering insights (including double-frame telemetry, silent SSO re-authentication, and incremental delta pruning).
 
 ---
 
-## Table of contents
+## ✨ Why E5-M365Copilot-API? (Key Breakthroughs)
 
-- [Why use this?](#why-use-this)
+- 🔄 **Dual-Protocol Drop-In Compatibility**
+  - Speaks both **OpenAI Chat Completions** and **Anthropic Claude Messages** (`/v1/messages`) APIs natively.
+  - Seamlessly streams Chain-of-Thought reasoning (`reasoning_content` / `<thinking>`) and handles Anthropic-specific SSE content block transitions.
+  - Direct model alias resolution (`claude-3-5-sonnet`, `claude-3-opus`, `gpt-4o`, `copilot`) via intelligent agent registry.
+
+- ⚡ **Multi-Account Session Pool & Concurrency Engine**
+  - **Thread-Safe Pooling (`server/accounts.py`)**: Bind multiple Microsoft/Google accounts to specific API keys. The engine automatically rotates and load-balances across healthy sessions.
+  - **Compound Routing & Isolation (`api_key:session_name:hash`)**: Guarantees strict multi-tenant conversation isolation across multiple users and threads.
+  - **Token Bucket Rate Limiting**: Built-in per-session rate limiters (`RATE_LIMIT_RPM`, `RATE_LIMIT_BURST`) prevent account throttling.
+
+- 🛡️ **Self-Healing & Protocol Mastery (`driver.py` & `api.py`)**
+  - **Double-Frame Telemetry Closed-Loop (`\x1E`)**: Strictly unpacks and sends paired `Chat` + `Metrics` telemetry frames required by Microsoft E5 Substrate, eliminating backend disconnects.
+  - **`Disengaged` Circuit Breaker (502 Self-Healing)**: Automatically detects Copilot `Disengaged` disconnection signals, discards stale `conversation_id`s, retries seamlessly on fresh sockets, and triggers a clean 502 circuit breaker if upstream persists.
+  - **Incremental Delta Pruning (`_slice_delta_prompt`)**: Automatically slices multi-turn history from the last `assistant` turn, sending only system prompts plus the latest user delta to dramatically reduce E5 token overhead and latency.
+
+- 🔐 **24-Hour Silent SSO Re-Authentication (`reauth_with_sso`)**
+  - Captures `ESTSAUTH` and `ESTSAUTHPERSISTENT` cookies directly from `login.microsoftonline.com` during initial login.
+  - When access tokens expire, the background engine silently renews them against the M365 Substrate OAuth exchange (`sso_reload=True`) **without opening browser windows or interrupting API requests**.
+
+- 🎨 **Multi-Modal Image Generation & Editing (`/v1/images/*`)**
+  - Full support for **`/v1/images/generations`** and **`/v1/images/edits`**.
+  - Accepts image prompts and input attachments, automatically parses Copilot Designer output URLs, and supports both `response_format="url"` and `response_format="b64_json"`.
+
+- 🧹 **Trace-Free UI & Warmup Cleanup (`_CDP_DELETE_MSG_JS`)**
+  - When minting chat tokens via warmup greetings (`"hi"`), the browser engine immediately executes DOM/CDP cleanup scripts (`button[aria-label*='Delete']`) to silently delete the test message from your account history.
+
+- 🔒 **Enterprise Security & SSRF Protection**
+  - Built-in `SSRFProtectedSession` actively intercepts requests pointing to internal metadata services (`169.254.169.254`, `127.0.0.1`, `10.0.0.0/8`, etc.).
+  - All logs strictly redact sensitive OAuth tokens, refresh codes, and session credentials (`mask_token`).
+
+---
+
+## 📋 Table of Contents
+
 - [Requirements](#requirements)
-- [Setup (2 minutes)](#setup-2-minutes)
-- [Run with Docker (optional)](#run-with-docker-optional)
-- [Usage 1: In Python (no server)](#usage-1-in-python-no-server)
-- [Usage 2: As an OpenAI-compatible server](#usage-2-as-an-openai-compatible-server)
-- [Command line](#command-line)
-- [Concurrency & stress test](#concurrency--stress-test)
-- [Rate limiting](#rate-limiting)
-- [Project layout](#project-layout)
-- [Notes & limitations](#notes--limitations)
-- [Troubleshooting](#troubleshooting)
-- [Collaboration & support](#collaboration--support)
-- [License](#license)
-- [Star History](#star-history)
+- [Setup (2 Minutes)](#setup-2-minutes)
+- [Running with Docker & noVNC](#running-with-docker--novnc)
+- [Supported API Endpoints](#supported-api-endpoints)
+- [Usage Guide](#usage-guide)
+  - [1. OpenAI SDK Drop-In](#1-openai-sdk-drop-in)
+  - [2. Anthropic Claude SDK Drop-In](#2-anthropic-claude-sdk-drop-in)
+  - [3. Python Native Client (`CopilotClient`)](#3-python-native-client-copilotclient)
+  - [4. Multi-Modal Image Generation & Editing](#4-multi-modal-image-generation--editing)
+- [Multi-Account Pool & Admin Management](#multi-account-pool--admin-management)
+- [Configuration & Environment Variables](#configuration--environment-variables)
+- [Troubleshooting & Diagnostics](#troubleshooting--diagnostics)
+- [License & Star History](#license--star-history)
 
 ---
 
-## Why use this?
-
-- **Free:** uses your normal signed-in Copilot, no API billing.
-- **Drop-in OpenAI replacement:** point any OpenAI client at `localhost` and it just works.
-- **Works everywhere you're signed in:** the signed-in path works even in regions where *anonymous* Copilot is blocked (e.g. India).
-- **Streaming + conversations:** token-by-token output and multi-turn threads addressed by `conversation_id`.
-
----
-
-## Requirements
+## 💻 Requirements
 
 - **Python 3.9+**
-- A **Microsoft account** (the free one you use for Copilot is fine)
-- Works on Windows, macOS, and Linux
+- A **Microsoft Account** (Free personal account, M365 E5 Substrate, or Google federated login)
+- Works natively on **Windows, macOS, Linux, and Docker**
 
 ---
 
-## Setup (2 minutes)
+## 🚀 Setup (2 Minutes)
 
-```bash
-# 1. Clone the project
-git clone <your-repo-url>
-cd E5-M365Copilot-API
-```
-
-**2. Create and activate a virtual environment**
+### 1. Clone & Activate Environment
 
 On **macOS / Linux**:
-
 ```bash
+git clone <your-repo-url> E5-M365Copilot-API
+cd E5-M365Copilot-API
 python3 -m venv venv
 source venv/bin/activate
 ```
 
-On **Windows** (PowerShell):
-
+On **Windows (PowerShell)**:
 ```powershell
+git clone <your-repo-url> E5-M365Copilot-API
+cd E5-M365Copilot-API
 python -m venv venv
 venv\Scripts\Activate.ps1
 ```
 
-> On Windows you may need to allow script execution once: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. In `cmd.exe` activate with `venv\Scripts\activate.bat` instead.
-
-**3. Install dependencies and sign in**
+### 2. Install Dependencies & Browser Drivers
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
-
-# Install the browser Playwright needs (one-time)
 playwright install chromium
+```
 
-# Sign in once: a browser opens, log into your Microsoft or Google account
+### 3. Sign In Once
+
+```bash
 python -m copilot login
 ```
 
-The browser **closes by itself** once sign-in is detected — you don't need to press Enter or close it manually. After sign-in it sends one short warm-up message that mints the chat token and validates your session credentials in the same step (a brief "finishing setup…" appears, and a tiny throwaway chat lands in your history). The steps are logged to `session/login.log` if anything goes wrong. That's it: your session is saved under `session/` (git-ignored, never shared) and reused on every run — so your first request works right away.
-
-> 🛠️ **Run into trouble during setup or your first run?** Head to the [Troubleshooting](#troubleshooting) section, the bundled diagnostic both *refreshes* session credentials and *logs* a shareable report.
+A visible browser window will open at `copilot.microsoft.com`. Sign in to your Microsoft or Google account. Once signed in, the window **closes automatically**. The engine captures your session, SSO cookies, and chat tokens into `session/` (`token.json`).
 
 ---
 
-## Run with Docker (optional)
+## 🐳 Running with Docker & noVNC
 
-Prefer a container? You can run the OpenAI-compatible server in Docker once you've signed in.
-
-> **Sign in on the host first.** The login step above opens a *visible* browser, which can't run inside the headless container — so run `python -m copilot login` on your host to populate `session/`. The container mounts that folder and reuses the session credentials earned on the host. When credentials expire or require re-authentication, it returns a `401` or `403` — re-run `python -m copilot login` on the host to refresh `session/`.
+Run the gateway in Docker with embedded **noVNC** support, allowing you to perform interactive logins remotely via a web browser!
 
 ```bash
 docker compose up --build
-# -> Copilot OpenAI-compatible API on http://localhost:8000
 ```
 
-The [docker-compose.yml](docker-compose.yml) maps port `8000` and bind-mounts your `session/` so the login persists across restarts. Tune `RATE_LIMIT_RPM` / `RATE_LIMIT_BURST` there. To run without Compose, build and pass the same bindings by hand:
+- **OpenAI / Claude API Gateway**: `http://localhost:8000/v1`
+- **Web Admin & noVNC Login Portal**: `http://localhost:8000/` (or `/novnc/vnc.html`)
 
-```bash
-docker build -t windows-copilot-api .
-docker run --rm -p 8000:8000 -v "$(pwd)/session:/app/session" windows-copilot-api
-```
+> **Remote VNC Login:** If you run Docker on a headless Linux server/VPS, visit `http://<your-vps-ip>:8000/` and click **"Add Account"** or **"Interactive VNC Login"**. Enter your `WEB_AUTH_PASSWORD` to control the embedded Chromium browser directly from your web tab!
 
 ---
 
-## Usage 1: In Python (no server)
+## 🔌 Supported API Endpoints
 
-The simplest way if your code is already Python.
-
-```python
-from copilot import CopilotClient
-
-client = CopilotClient()                 # loads your signed-in session
-
-# Get a full reply
-reply = client.chat("Say hello in one short sentence.")
-print(reply.text)
-
-# Continue the SAME conversation — pass the id back
-reply2 = client.chat("And now in French?", reply.conversation_id)
-print(reply2.text)
-
-# Stream the answer as it's typed
-for chunk in client.stream("Tell me a short joke"):
-    print(chunk, end="", flush=True)
-```
-
-`chat()` returns the full text plus a `conversation_id`; pass that id back to keep the thread going, or omit it to start fresh. `stream()` yields the reply piece by piece.
-
-👉 More: [examples/01_direct_chat.py](examples/01_direct_chat.py), [02_direct_conversation.py](examples/02_direct_conversation.py), [03_direct_stream.py](examples/03_direct_stream.py)
+| Method | Endpoint | Protocol | Description |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/v1/chat/completions` | OpenAI | Full Chat Completions (`stream: true/false`, function/tool synthesis, image outputs) |
+| `POST` | `/v1/messages` | Anthropic Claude | Claude Messages API (`stream: true/false`, `reasoning_content` mapping) |
+| `POST` | `/v1/images/generations` | OpenAI Images | Generate high-quality images via Copilot Designer (`url` / `b64_json`) |
+| `POST` | `/v1/images/edits` | OpenAI Images | Modify/edit images based on text prompts and base64/URL image inputs |
+| `GET` | `/v1/models` | OpenAI / Claude | Lists available agent models and aliases |
+| `GET/POST` | `/api/accounts` | Admin Management | Manage multi-account session bindings and API keys (protected by `WEB_AUTH_PASSWORD`) |
 
 ---
 
-## Usage 2: As an OpenAI-compatible server
+## 📖 Usage Guide
 
-Start a local server that speaks the OpenAI API, so existing OpenAI tools and SDKs work unchanged.
-
+Start the local server:
 ```bash
 python app.py
-# -> Copilot OpenAI-compatible API on http://127.0.0.1:8000
+# Server listening on http://127.0.0.1:8000
 ```
 
-Then point any OpenAI client at it (the API key is required by the SDK but ignored):
+### 1. OpenAI SDK Drop-In
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
-
-resp = client.chat.completions.create(
-    model="copilot",
-    messages=[{"role": "user", "content": "Hello!"}],
+client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="sk-your-configured-key"  # Or "unused" if no pool keys configured
 )
-print(resp.choices[0].message.content)
+
+# Multi-turn streaming chat with reasoning
+response = client.chat.completions.create(
+    model="copilot",  # or "gpt-4o", "claude-3-5-sonnet"
+    messages=[
+        {"role": "system", "content": "You are a helpful coding expert."},
+        {"role": "user", "content": "Explain async recursion in Python."}
+    ],
+    stream=True
+)
+
+for chunk in response:
+    # Print thought block if present
+    if hasattr(chunk.choices[0].delta, "reasoning_content") and chunk.choices[0].delta.reasoning_content:
+        print(f"[{chunk.choices[0].delta.reasoning_content}]", end="")
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)
 ```
 
-Or call it with plain HTTP / `curl`:
+### 2. Anthropic Claude SDK Drop-In
+
+```python
+import anthropic
+
+client = anthropic.Anthropic(
+    base_url="http://localhost:8000",
+    api_key="sk-your-configured-key"
+)
+
+with client.messages.stream(
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Write a haiku about artificial intelligence."}],
+    model="claude-3-5-sonnet-20241022",
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="", flush=True)
+```
+
+### 3. Python Native Client (`CopilotClient`)
+
+For lightweight scripts without running the local server:
+
+```python
+from copilot import CopilotClient
+
+client = CopilotClient()  # Automatically loads session from session/
+
+# Direct multi-turn conversation
+reply1 = client.chat("Hello! My name is Alice.")
+print(f"Copilot: {reply1.text} (Conversation ID: {reply1.conversation_id})")
+
+reply2 = client.chat("What is my name?", conversation_id=reply1.conversation_id)
+print(f"Copilot: {reply2.text}")
+
+# Streaming
+for chunk in client.stream("Tell me a quick joke."):
+    print(chunk, end="", flush=True)
+```
+
+### 4. Multi-Modal Image Generation & Editing
+
+Generate or edit images using the official OpenAI `images` SDK:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="sk-any")
+
+# Image Generation
+gen_response = client.images.generate(
+    prompt="A futuristic cyber-punk cityscape at sunset with neon rain, 8k resolution",
+    n=1,
+    response_format="url"
+)
+print("Generated Image URL:", gen_response.data[0].url)
+
+# Image Editing (Base64 or URL input)
+edit_response = client.images.edit(
+    image=open("input_image.png", "rb"),
+    prompt="Add a glowing golden dragon flying between the skyscrapers",
+    response_format="b64_json"
+)
+# edit_response.data[0].b64_json contains the base64 encoded png
+```
+
+---
+
+## 🏢 Multi-Account Pool & Admin Management
+
+When running under high load or multi-user enterprise scenarios, a single Microsoft account can be throttled. E5-M365Copilot-API solves this with `server/accounts.py`:
+
+1. **Sign in multiple accounts** into different session directories (e.g. `sessions/work_account`, `sessions/personal_account`).
+2. **Bind them to API Keys** via `sessions/config.json` (or via the `/api/accounts` REST endpoint):
+   ```json
+   {
+     "api_keys": {
+       "sk-team-alpha-key-2026": ["work_account", "personal_account"],
+       "sk-dev-user-key-2026": ["personal_account"]
+     }
+   }
+   ```
+3. When requests arrive with `Authorization: Bearer sk-team-alpha-key-2026`, the server **load-balances across healthy accounts**, monitors rate limits (`TokenBucket`), and automatically rotates if an account triggers `502` or `Disengaged`.
+
+---
+
+## ⚙️ Configuration & Environment Variables
+
+You can customize server behavior using environment variables or a `.env` file:
+
+| Environment Variable | Default | Description |
+| :--- | :--- | :--- |
+| `HOST` | `0.0.0.0` | Server host interface |
+| `PORT` | `8000` | Server listening port |
+| `WEB_AUTH_PASSWORD` | *(None)* | **Required for Admin & noVNC access.** Password to secure `/api/accounts` and `/novnc/vnc-ws` |
+| `RATE_LIMIT_RPM` | `12` | Maximum sustained requests per minute per session (`0` disables rate limiting) |
+| `RATE_LIMIT_BURST` | `4` | Maximum back-to-back instant burst requests allowed before throttling |
+| `HTTP_PROXY` / `HTTPS_PROXY` | *(None)* | Proxy URL for Chromium login and HTTP/Socket.IO connections |
+
+---
+
+## 🛠️ Troubleshooting & Diagnostics
+
+If your session experiences disconnection or login issues, run the built-in diagnostic and self-healing suite:
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "Hello!"}]}'
+python tests/diagnostic.py                # Runs browser test + generates clean report
+python tests/diagnostic.py --report-only  # Headless mode: report only without opening window
 ```
 
-**Endpoints**
-
-| Method | Path | Description |
-| --- | --- | --- |
-| `POST` | `/v1/chat/completions` | Chat (supports `"stream": true` and an optional `"conversation_id"`) |
-| `GET`  | `/v1/models` | Lists the single `copilot` model |
-
-> Change the address with env vars: `HOST=0.0.0.0 PORT=8080 python app.py`, or run `uvicorn server.api:app --host 0.0.0.0 --port 8080`.
-
-👉 More: [examples/04_server_http.py](examples/04_server_http.py), [05_server_stream.py](examples/05_server_stream.py), [06_server_openai_sdk.py](examples/06_server_openai_sdk.py)
+What `diagnostic.py` does:
+1. **Refreshes Credentials**: Launches Chromium on `session/profile/`, renews Microsoft Substrate cookies (`ESTSAUTH`), and refreshes `token.json`.
+2. **Captures Protocol Trace**: Records live WebSocket framing (`setOptions` → `Chat` + `Metrics` telemetry → `appendText`) to `session/ws_capture.log`.
+3. **Generates Redacted Report**: Writes `session/diagnostic_report.txt` containing health metrics, token lengths, and live probes. **All tokens, cookies, and personal emails are strictly masked and redacted**, making the report 100% safe to attach to GitHub issues.
 
 ---
 
-## Command line
+## 📁 Project Structure
 
-```bash
-python -m copilot login          # sign in and save the session
-python -m copilot ask "Hello!"   # quick one-shot question
+```text
+E5-M365Copilot-API/
+├── copilot/
+│   ├── driver.py           # Substrate WebSocket driver, double-frame telemetry, SSE parser
+│   ├── browser.py          # Playwright Chromium manager, SSO cookie extraction, UI warmup cleanup
+│   ├── auth.py             # 24-hour silent SSO reauth (ESTSAUTH broker) & Pure API token renewal
+│   ├── models.py           # Pydantic data schemas for messages, attachments, and image outputs
+│   ├── agent_registry.py   # Model alias registry (OpenAI / Claude / Substrate options sets)
+│   └── utils.py            # SSRF protection, token redaction (`mask_token`), and logging utilities
+├── server/
+│   ├── api.py              # FastAPI application, OpenAI / Claude routes, Disengaged circuit breakers
+│   ├── router.py           # Multi-turn conversation state router & incremental delta pruning
+│   ├── accounts.py         # Multi-account thread-safe session pool, rate limiters (`TokenBucket`)
+│   ├── prompt.py           # Context formatting, tool-call synthesis, and file attachment extraction
+│   └── claude_format.py    # Anthropic Claude SSE event and JSON response generators
+├── tests/
+│   ├── test_router.py      # Conversation state LRU eviction and compound routing tests
+│   ├── test_routing.py     # Agent registry model matching and case-insensitivity tests
+│   ├── test_regression.py  # Telemetry framing, attachment limits, and token masking tests
+│   └── test_component3.py  # Delta pruning, synthetic tools, and image endpoint validation tests
+├── app.py                  # Entry point to launch the uvicorn FastAPI server
+├── requirements.txt        # Python dependency declarations
+└── docker-compose.yml      # Multi-stage Docker container build with embedded noVNC portal
 ```
 
 ---
 
-## Session & Authentication Management
+## 📜 License & Star History
 
-Copilot E5 Substrate chat relies on authenticated Microsoft 365 session tokens and cookies. The bridge manages these automatically:
+Released under the [MIT License](LICENSE). 
 
-- **At sign-in:** `python -m copilot login` authenticates your account and stores session tokens in `session/`.
-- **When credentials expire:** if a request fails due to expired tokens or cookies, re-authenticate out of band by running `python -m copilot login` on your host machine to refresh `session/`.
-
-The **server** never opens a window: when session credentials expire or fail authentication, it returns an HTTP `401` or `403`. Re-authenticate out of band with `python -m copilot login`, then retry.
-
----
-
-## Concurrency & stress test
-
-The server bridges a **single** signed-in Copilot account, and Copilot's chat
-socket doesn't tolerate concurrent conversations from one process. So the server
-**serializes** upstream calls: parallel HTTP requests queue behind a lock and run
-one at a time (see [server/api.py](server/api.py)). This is intentional, and it
-means throughput is sequential, not parallel.
-
-You can measure where it breaks with the included stress test, which fires a
-batch of simultaneous requests and **doubles the batch size every successful
-round** until the first error:
-
-```bash
-# Start the server in one terminal
-python app.py
-
-# Ramp concurrency in another (1 → 2 → 4 → 8 → …)
-python tests/stress.py
-python tests/stress.py --max 64 --timeout 120 --url http://localhost:8000
-```
-
-**Sample run** (one signed-in account):
-
-| Concurrency | Result | Wall time | Latency (min / median / max) |
-| --- | --- | --- | --- |
-| 1 | ✓ all ok | 3.7s | 3.7 / 3.7 / 3.7s |
-| 2 | ✓ all ok | 4.6s | 3.4 / 4.6 / 4.6s |
-| 4 | ✓ all ok | 8.3s | 3.7 / 6.7 / 8.3s |
-| 8 | ✗ 1 failed (`HTTP 502`) | 13.3s | 3.5 / 9.7 / 13.3s |
-
-**Highest fully-successful concurrency: 4.** Wall time roughly doubles each round
-while *minimum* latency stays flat (~3.5s) — the signature of a serialized queue:
-one request runs immediately, the rest wait their turn. The failure at 8 is an
-upstream `502` (Copilot rejecting requests under load), not a server crash or
-timeout — so the exact break point is flaky and may vary between runs.
-
-> Takeaway: keep concurrent in-flight requests low (≈ 1–4). This is a personal
-> bridge, not a high-throughput gateway — and please don't hammer your account.
-
----
-
-## Rate limiting
-
-Concurrency (above) is *how many at once*; the **rate limit** is *how many per
-minute, sustained*. Microsoft publishes none for Copilot chat, so the bridge
-enforces a self-imposed one with a [token bucket](server/ratelimit.py): it caps
-accepted requests per minute and returns a standard `429` + `Retry-After` when
-you exceed it. Two env vars tune it:
-
-| Env var | Default | Meaning |
-| --- | --- | --- |
-| `RATE_LIMIT_RPM` | `12` | Requests/minute the bridge accepts. `0` disables the limit. |
-| `RATE_LIMIT_BURST` | `4` | How many requests may go back-to-back before pacing kicks in. |
-
-```bash
-RATE_LIMIT_RPM=20 RATE_LIMIT_BURST=5 python app.py   # raise it; 0 to disable
-```
-
-The default 12 rpm sits safely below the ~15 rpm where a single account starts
-seeing upstream `502`s. To find *your* ceiling, run the server with the limiter
-off (`RATE_LIMIT_RPM=0`) and push the probe until failures appear:
-
-```bash
-python tests/ratelimit.py --rpm 20 --minutes 3
-```
-
-**On the client side, use exponential backoff.** Both `429` (bridge limit) and
-the occasional `502` (Copilot upstream hiccup) are transient — retry with
-growing delays (e.g. 1s, 2s, 4s) and they almost always clear. The official
-`openai` SDK does this automatically and honours `Retry-After`; with plain HTTP,
-add a few retries yourself.
-
----
-
-## Project layout
-
-| Path | What it does |
-| --- | --- |
-| [copilot/](copilot/) | The core library: `CopilotClient`, auth, browser sign-in, HTTP driver |
-| [server/](server/) | The FastAPI OpenAI-compatible server |
-| [examples/](examples/) | Runnable examples for every feature ([examples/README.md](examples/README.md)) |
-| [tests/](tests/) | Test scripts: the concurrency stress test ([tests/stress.py](tests/stress.py)) and the diagnostic & report tool ([tests/diagnostic.py](tests/diagnostic.py)) |
-| [app.py](app.py) | Starts the server |
-
----
-
-## Notes & limitations
-
-- **Sign in once, then reuse.** The cached token refreshes automatically; you only re-sign-in if the session fully expires.
-- **No daily limit, but be reasonable.** Microsoft doesn't impose a daily chat cap, but please use it in moderation, and don't spam or hammer it with automated bulk requests.
-- **One model.** Copilot has no model picker, so the server advertises a single model named `copilot`.
-- **Roughly GPT-4 class.** On GPQA Diamond (198 graduate-level questions, closed-book) it scores **40.9%**, which puts it in the GPT-4 family rather than the reasoning tier (o1/o3). Measured with [tests/gpqa_bench.py](tests/gpqa_bench.py).
-- **Your session is private.** Everything in `session/` (cookies + token) stays on your machine and is git-ignored.
-
----
-
-## Troubleshooting
-
-If a request fails due to session or network issues, run the diagnostic — it
-refreshes the session and writes a shareable report.
-
-```bash
-python tests/diagnostic.py                # browser capture + report
-python tests/diagnostic.py --report-only  # headless/VPS: report only, no browser
-```
-
-The default run opens your signed-in browser and asks you to send one short
-message. That single action:
-
-- **Refreshes session credentials:** it drives a *real* browser on the same
-  `session/profile/` the bridge uses, renewing session cookies and access tokens,
-  then snapshots the session into `session/token.json` for the HTTP driver to adopt.
-- **Captures the protocol** to `session/ws_capture.log`. A clean turn goes
-  `setOptions` → `send` → `appendText…` → `done`.
-
-It also writes `session/diagnostic_report.txt` — environment, the *shape* of your
-session (cookie names + token length, never the values), a live chat probe, and
-redacted log tails. **Both files are safe to share:** access tokens, cookies,
-OAuth codes, and emails are redacted before anything is written. Attach
-`diagnostic_report.txt` to a GitHub issue (skim it first) and the cause is
-usually obvious.
-
----
-
-## Collaboration & support
-
-Need a hand getting this running? Open a [GitHub issue](../../issues) for bugs (for setup/auth problems, attach the redacted `diagnostic_report.txt` from `python tests/diagnostic.py`), start a [discussion](../../discussions) to share ideas, or send a pull request.
-
-And if you're working on something interesting, or looking for someone to build it, I'm always open to a chat. Feel free to reach out:
-
-- X: [@sums001](https://x.com/sums001)
-- Email: [devsum0101@gmail.com](mailto:devsum0101@gmail.com)
-- Discord: `sum_s_s`
-
----
-
-## License
-
-Released under the [MIT License](LICENSE). As this is an unofficial project, you remain responsible for complying with Microsoft's terms of service.
-
----
-
-## Star History
+> **Disclaimer:** This is an independent, open-source project and is not affiliated with, endorsed by, or sponsored by Microsoft Corporation or Anthropic. It automates authorized user access to Microsoft 365 Copilot web endpoints. Please use responsibly and in accordance with Microsoft's terms of service.
 
 <a href="https://www.star-history.com/?repos=sums001%2FWindows-Copilot-API&type=timeline&legend=top-left">
  <picture>

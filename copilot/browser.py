@@ -503,6 +503,19 @@ class BrowserCopilot:
         if getattr(self, "_network_listener_installed", False) or self._page is None:
             return
 
+        def on_request(request):
+            try:
+                url = request.url
+                if ("oauth2/nativeclient" in url or "spalanding#code=" in url or "code=" in url) and not getattr(self, "_captured_auth_code", None):
+                    from urllib.parse import urlparse, parse_qs
+                    parsed = urlparse(url)
+                    qs = parse_qs(parsed.query or parsed.fragment)
+                    if "code" in qs and qs["code"]:
+                        self._captured_auth_code = qs["code"][0]
+                        print("[Browser] Captured nativeclient/SSO auth code directly from network stream!")
+            except Exception:
+                pass
+
         def on_response(response):
             try:
                 if "login.microsoftonline.com" in response.url and "/oauth2/v2.0/token" in response.url:
@@ -513,6 +526,7 @@ class BrowserCopilot:
                 pass
 
         try:
+            self._page.on("request", on_request)
             self._page.on("response", on_response)
             self._network_listener_installed = True
         except PlaywrightError:
@@ -593,11 +607,48 @@ class BrowserCopilot:
 
         while time.time() < deadline:
             if self._captured_chat_token:
+                self._cleanup_warmup_msg()
                 return self._captured_chat_token
             if self._window_closed():
                 break
             self._page.wait_for_timeout(500)
+        self._cleanup_warmup_msg()
         return self.access_token()
+
+    _CDP_DELETE_MSG_JS = """
+    (() => {
+        try {
+            const delBtns = document.querySelectorAll('button[aria-label*="Delete"], button[aria-label*="删除"], button[title*="Delete"], button[title*="删除"]');
+            if (delBtns && delBtns.length > 0) {
+                delBtns[delBtns.length - 1].click();
+                return true;
+            }
+            const moreBtns = document.querySelectorAll('button[aria-label*="More"], button[aria-label*="更多"], button[title*="More options"]');
+            if (moreBtns && moreBtns.length > 0) {
+                moreBtns[moreBtns.length - 1].click();
+                setTimeout(() => {
+                    const del = document.querySelector('button[aria-label*="Delete"], button[aria-label*="删除"], [role="menuitem"]');
+                    if (del) del.click();
+                }, 300);
+                return true;
+            }
+        } catch (e) {}
+        return false;
+    })();
+    """
+
+    def _cleanup_warmup_msg(self) -> None:
+        """Silently delete the warmup/nudge greeting message from the UI (`_CDP_DELETE_MSG_JS`)."""
+        if self._page:
+            try:
+                # Give the UI a brief window (up to 3s) for the message menu to render or reply to start
+                for attempt in range(3):
+                    if self._page.evaluate(self._CDP_DELETE_MSG_JS):
+                        print("[Browser] Silently cleaned up warmup greeting message from UI.")
+                        break
+                    self._page.wait_for_timeout(800)
+            except Exception:
+                pass
 
     def _await_warmup_reply(self, timeout: int = 60) -> bool:
         """Wait for an already-sent warm-up turn to receive a reply."""
@@ -623,12 +674,33 @@ class BrowserCopilot:
             if any(domain in c.get("domain", "") for domain in ("microsoft.com", "microsoftonline.com", "office.com", "office365.com", "live.com", "bing.com"))
         }
 
+    def sso_cookies(self) -> Dict[str, str]:
+        """Extract ESTSAUTH and ESTSAUTHPERSISTENT specifically for silent SSO reauth (M365Bridge pattern)."""
+        self._ensure_started()
+        sso = {}
+        try:
+            raw = self._context.cookies("https://login.microsoftonline.com")
+            for c in raw:
+                if c.get("name") in ("ESTSAUTH", "ESTSAUTHPERSISTENT"):
+                    sso[c["name"]] = c["value"]
+        except PlaywrightError:
+            pass
+        if not sso:
+            try:
+                raw_all = self._context.cookies()
+                for c in raw_all:
+                    if c.get("name") in ("ESTSAUTH", "ESTSAUTHPERSISTENT"):
+                        sso[c["name"]] = c["value"]
+            except Exception:
+                pass
+        return sso
+
     def _ensure_on_chat(self) -> None:
         """Force navigation to Copilot chat page if currently on a different page."""
         if self._page:
             try:
                 current_url = self._page.url
-                if "/chat" not in current_url:
+                if "/chat" not in current_url and "copilot.microsoft.com" not in current_url and "m365.cloud.microsoft/chat" not in current_url:
                     print(f"[Browser] Redirecting from {current_url} to {COPILOT_URL}...")
                     self._page.goto(COPILOT_URL, wait_until="domcontentloaded")
                     self._page.wait_for_timeout(2000)
@@ -658,6 +730,7 @@ class BrowserCopilot:
 
         auth = {
             "cookies": self.cookies(),
+            "sso_cookies": self.sso_cookies(),
             "access_token": token,
             "graph_token": self.graph_token(),
             "refresh_token": getattr(self, "_captured_refresh_token", None),

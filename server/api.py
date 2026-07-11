@@ -21,7 +21,7 @@ from .openai_format import (
     sse_event,
     stream_chunk,
 )
-from .schemas import ChatCompletionRequest, ClaudeMessageRequest
+from .schemas import ChatCompletionRequest, ClaudeMessageRequest, ImageGenerationRequest, ImageEditRequest
 from server.prompt import messages_to_prompt, extract_files
 from server.router import router
 from .claude_format import (
@@ -446,6 +446,17 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                                 yield from _stream(session, prompt, model, req.messages, conversation_id, plugins, files=files, api_key=api_key)
                                 return  # Success, exit retry loop
                             except RuntimeError as e:
+                                if "Disengaged" in str(e):
+                                    print(f"[API] Encountered Disengaged disconnect (attempt {attempt+1}/{max_retries}). Generating fresh conversation_id...")
+                                    conversation_id = None
+                                    if attempt == max_retries - 1:
+                                        import time
+                                        from .openai_format import sse_event, stream_chunk
+                                        print("[API] Persistent Disengaged disconnect. Circuit breaker triggered (502).")
+                                        yield sse_event(stream_chunk("err-chatcmpl", int(time.time()), model or "copilot", {"content": "\n[error: Copilot backend disconnected (Disengaged). Circuit breaker triggered.]"}, finish="error"))
+                                        yield "data: [DONE]\n\n"
+                                        return
+                                    continue
                                 if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
                                     print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
                                     # Force this session to be unhealthy by removing its token, so the next acquire picks a different session
@@ -458,6 +469,15 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                                 raise
                     except Exception as e:
                         preferred_session = None
+                        if "Disengaged" in str(e):
+                            conversation_id = None
+                            if attempt == max_retries - 1:
+                                import time
+                                from .openai_format import sse_event, stream_chunk
+                                yield sse_event(stream_chunk("err-chatcmpl", int(time.time()), model or "copilot", {"content": "\n[error: Copilot backend disconnected (Disengaged). Circuit breaker triggered.]"}, finish="error"))
+                                yield "data: [DONE]\n\n"
+                                return
+                            continue
                         if attempt == max_retries - 1:
                             import time
                             from .openai_format import sse_event, stream_chunk
@@ -489,6 +509,16 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                             reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=plugins, e5_attachments=files)
                             break  # Success
                         except RuntimeError as e:
+                            if "Disengaged" in str(e):
+                                print(f"[API] Encountered Disengaged disconnect (attempt {attempt+1}/{max_retries}). Generating fresh conversation_id...")
+                                conversation_id = None
+                                if attempt == max_retries - 1:
+                                    print("[API] Persistent Disengaged disconnect. Circuit breaker triggered (502).")
+                                    return JSONResponse(
+                                        status_code=502,
+                                        content={"error": {"message": "Copilot backend disconnected (Disengaged). Circuit breaker triggered.", "type": "disengaged_error"}}
+                                    )
+                                continue
                             if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
                                 print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
                                 # Force this session to be unhealthy by removing its token, so the next acquire picks a different session
@@ -501,6 +531,14 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                             raise
                 except Exception as e:
                     preferred_session = None
+                    if "Disengaged" in str(e):
+                        conversation_id = None
+                        if attempt == max_retries - 1:
+                            return JSONResponse(
+                                status_code=502,
+                                content={"error": {"message": "Copilot backend disconnected (Disengaged). Circuit breaker triggered.", "type": "disengaged_error"}}
+                            )
+                        continue
                     if attempt == max_retries - 1:
                         return JSONResponse(
                             status_code=500,
@@ -600,6 +638,24 @@ def claude_messages(
                             yield from _stream_claude(session, prompt, model, standard_messages, plugins=None, conversation_id=conversation_id, files=files, api_key=api_key)
                             return
                         except RuntimeError as e:
+                            if "Disengaged" in str(e):
+                                print(f"[API] Encountered Disengaged disconnect (attempt {attempt+1}/{max_retries}). Generating fresh conversation_id...")
+                                conversation_id = None
+                                if attempt == max_retries - 1:
+                                    from .claude_format import (
+                                        stream_message_start, stream_content_block_start,
+                                        stream_content_block_delta, stream_content_block_stop,
+                                        stream_message_delta, stream_message_stop, new_msg_id
+                                    )
+                                    msg_id = new_msg_id()
+                                    yield stream_message_start(msg_id, model or "copilot")
+                                    yield stream_content_block_start(index=0)
+                                    yield stream_content_block_delta(index=0, text="\n[error: Copilot backend disconnected (Disengaged). Circuit breaker triggered.]")
+                                    yield stream_content_block_stop(index=0)
+                                    yield stream_message_delta(stop_reason="error")
+                                    yield stream_message_stop()
+                                    return
+                                continue
                             if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
                                 print(f"[API] Claude session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
                                 session.client.invalidate_auth()
@@ -610,6 +666,23 @@ def claude_messages(
                             raise
                 except Exception as e:
                     preferred_session = None
+                    if "Disengaged" in str(e):
+                        conversation_id = None
+                        if attempt == max_retries - 1:
+                            from .claude_format import (
+                                stream_message_start, stream_content_block_start,
+                                stream_content_block_delta, stream_content_block_stop,
+                                stream_message_delta, stream_message_stop, new_msg_id
+                            )
+                            msg_id = new_msg_id()
+                            yield stream_message_start(msg_id, model or "copilot")
+                            yield stream_content_block_start(index=0)
+                            yield stream_content_block_delta(index=0, text="\n[error: Copilot backend disconnected (Disengaged). Circuit breaker triggered.]")
+                            yield stream_content_block_stop(index=0)
+                            yield stream_message_delta(stop_reason="error")
+                            yield stream_message_stop()
+                            return
+                        continue
                     if attempt == max_retries - 1:
                         from .claude_format import (
                             stream_message_start, stream_content_block_start,
@@ -645,6 +718,12 @@ def claude_messages(
                         reply = session.client.chat(prompt, conversation_id=conversation_id, model=model, plugins=None, e5_attachments=files)
                         break
                     except RuntimeError as e:
+                        if "Disengaged" in str(e):
+                            print(f"[API] Encountered Disengaged disconnect (attempt {attempt+1}/{max_retries}). Generating fresh conversation_id...")
+                            conversation_id = None
+                            if attempt == max_retries - 1:
+                                return JSONResponse(status_code=502, content={"error": {"message": "Copilot backend disconnected (Disengaged). Circuit breaker triggered.", "type": "disengaged_error"}})
+                            continue
                         if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
                             print(f"[API] Claude session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
                             session.client.invalidate_auth()
@@ -655,6 +734,11 @@ def claude_messages(
                         raise
             except Exception as e:
                 preferred_session = None
+                if "Disengaged" in str(e):
+                    conversation_id = None
+                    if attempt == max_retries - 1:
+                        return JSONResponse(status_code=502, content={"error": {"message": "Copilot backend disconnected (Disengaged). Circuit breaker triggered.", "type": "disengaged_error"}})
+                    continue
                 if attempt == max_retries - 1:
                     return JSONResponse(status_code=500, content={"error": {"message": f"Failed to complete request: {str(e)}", "type": "server_error"}})
                 continue
@@ -675,6 +759,108 @@ def claude_messages(
             router.save_state(new_head_hash, reply.conversation_id, session.session_name, api_key=api_key)
                     
         return message_response(final_text, model)
+
+
+@app.post("/v1/images/generations")
+def image_generations(
+    req: ImageGenerationRequest,
+    creds: HTTPAuthorizationCredentials = Depends(security),
+    x_api_key: str = Header(None)
+):
+    api_key = x_api_key or (creds.credentials if creds else None)
+    if not api_key:
+        return JSONResponse(status_code=401, content={"error": {"message": "Missing API Key", "type": "authentication_error"}})
+        
+    import base64
+    import re
+    import requests
+
+    try:
+        with pool.acquire_session(api_key) as session:
+            reply = session.client.chat(f"Please generate an image based on this description: {req.prompt}")
+            image_urls = [img.url for img in getattr(reply, "images", []) if getattr(img, "url", None)]
+            if not image_urls and getattr(reply, "text", ""):
+                found = re.findall(r'!\[.*?\]\((https?://[^\s\)]+)\)', reply.text)
+                image_urls.extend(found)
+                
+            if not image_urls:
+                return JSONResponse(status_code=500, content={"error": {"message": "Failed to generate image or no image URLs returned by Copilot.", "type": "server_error"}})
+                
+            data = []
+            for url in image_urls:
+                if req.response_format == "b64_json":
+                    try:
+                        resp = requests.get(url, timeout=15)
+                        if resp.status_code == 200:
+                            b64 = base64.b64encode(resp.content).decode("utf-8")
+                            data.append({"b64_json": b64})
+                        else:
+                            data.append({"url": url})
+                    except Exception:
+                        data.append({"url": url})
+                else:
+                    data.append({"url": url})
+                    
+            return {"created": int(time.time()), "data": data[:req.n]}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": {"message": str(e), "type": "server_error"}})
+
+
+@app.post("/v1/images/edits")
+def image_edits(
+    req: ImageEditRequest,
+    creds: HTTPAuthorizationCredentials = Depends(security),
+    x_api_key: str = Header(None)
+):
+    api_key = x_api_key or (creds.credentials if creds else None)
+    if not api_key:
+        return JSONResponse(status_code=401, content={"error": {"message": "Missing API Key", "type": "authentication_error"}})
+        
+    import base64
+    import re
+    import requests
+
+    try:
+        attachments = []
+        if req.image:
+            img_data = req.image
+            if img_data.startswith("http://") or img_data.startswith("https://"):
+                resp = requests.get(img_data, timeout=15)
+                img_bytes = resp.content
+            else:
+                if "," in img_data:
+                    img_data = img_data.split(",", 1)[1]
+                img_bytes = base64.b64decode(img_data)
+            attachments.append({"data": img_bytes, "mime_type": "image/png", "file_name": "input_image.png"})
+
+        with pool.acquire_session(api_key) as session:
+            reply = session.client.chat(f"Please modify and edit this image according to the instruction: {req.prompt}", e5_attachments=attachments if attachments else None)
+            image_urls = [img.url for img in getattr(reply, "images", []) if getattr(img, "url", None)]
+            if not image_urls and getattr(reply, "text", ""):
+                found = re.findall(r'!\[.*?\]\((https?://[^\s\)]+)\)', reply.text)
+                image_urls.extend(found)
+                
+            if not image_urls:
+                return JSONResponse(status_code=500, content={"error": {"message": "Failed to edit image or no image URLs returned.", "type": "server_error"}})
+                
+            data = []
+            for url in image_urls:
+                if req.response_format == "b64_json":
+                    try:
+                        resp = requests.get(url, timeout=15)
+                        if resp.status_code == 200:
+                            b64 = base64.b64encode(resp.content).decode("utf-8")
+                            data.append({"b64_json": b64})
+                        else:
+                            data.append({"url": url})
+                    except Exception:
+                        data.append({"url": url})
+                else:
+                    data.append({"url": url})
+                    
+            return {"created": int(time.time()), "data": data[:req.n]}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": {"message": str(e), "type": "server_error"}})
 
 
 # verify_admin has been moved up to protect routes globally

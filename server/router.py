@@ -85,10 +85,30 @@ class ConversationRouter:
         import re
         s = ""
         for m in messages:
-            content = content_text(m.content)
-            content = re.sub(r'<think>.*?</think>\n*', '', content, flags=re.DOTALL)
-            s += f"|{m.role}|{content}"
+            role = getattr(m, "role", "") if not isinstance(m, dict) else m.get("role", "")
+            content = getattr(m, "content", "") if not isinstance(m, dict) else m.get("content", "")
+            content_str = content_text(content)
+            content_str = re.sub(r'<think>.*?</think>\n*', '', content_str, flags=re.DOTALL)
+            s += f"|{role}|{content_str}"
         return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+    def _slice_delta_prompt(self, messages) -> str:
+        """Find the last assistant message and slice only the delta turns after it."""
+        last_asst_idx = -1
+        for idx, m in enumerate(messages[:-1]):
+            role = getattr(m, "role", "") if not isinstance(m, dict) else m.get("role", "")
+            if role == "assistant":
+                last_asst_idx = idx
+        if last_asst_idx >= 0:
+            delta = messages[last_asst_idx + 1 :]
+        else:
+            delta = [messages[-1]]
+        if len(delta) == 1:
+            role = getattr(delta[0], "role", "") if not isinstance(delta[0], dict) else delta[0].get("role", "")
+            if role == "user":
+                content = getattr(delta[0], "content", "") if not isinstance(delta[0], dict) else delta[0].get("content", "")
+                return content_text(content)
+        return messages_to_prompt(delta)
 
     def route(self, api_key: str, messages, client_provided_cid: Optional[str]) -> Tuple[Optional[str], str, str, Optional[str]]:
         """
@@ -108,10 +128,9 @@ class ConversationRouter:
             
         # If client explicitly provides a conversation_id, trust it directly.
         if client_provided_cid:
-            return client_provided_cid, messages_to_prompt(messages), self._hash_messages(messages), None
+            return client_provided_cid, self._slice_delta_prompt(messages), self._hash_messages(messages), None
             
         history = messages[:-1]
-        last_msg = messages[-1]
         
         raw_history_hash = self._hash_messages(history)
         raw_new_hash = self._hash_messages(messages)
@@ -128,18 +147,14 @@ class ConversationRouter:
                 if compound_key in self.states:
                     state = self.states[compound_key]
                     self.states.move_to_end(compound_key)
-                    prompt = content_text(last_msg.content)
-                    if last_msg.role != "user":
-                        prompt = f"{last_msg.role.capitalize()}: {prompt}"
+                    prompt = self._slice_delta_prompt(messages)
                     return state.conversation_id, prompt, raw_new_hash, state.session_name
             
             # Also check fallback (legacy non-compound hash or single session)
             if raw_history_hash in self.states:
                 state = self.states[raw_history_hash]
                 self.states.move_to_end(raw_history_hash)
-                prompt = content_text(last_msg.content)
-                if last_msg.role != "user":
-                    prompt = f"{last_msg.role.capitalize()}: {prompt}"
+                prompt = self._slice_delta_prompt(messages)
                 return state.conversation_id, prompt, raw_new_hash, state.session_name
             
         # Fallback: Flatten the entire history and start a new Copilot thread

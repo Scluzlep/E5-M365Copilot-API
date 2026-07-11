@@ -41,3 +41,22 @@ class ClaudeMessageRequest(BaseModel):
     stream: bool = False
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
+
+
+class ImageGenerationRequest(BaseModel):
+    prompt: str
+    model: Optional[str] = "dall-e-3"
+    n: Optional[int] = 1
+    size: Optional[str] = "1024x1024"
+    response_format: Optional[str] = "url"  # "url" or "b64_json"
+    quality: Optional[str] = "standard"
+    style: Optional[str] = "vivid"
+
+
+class ImageEditRequest(BaseModel):
+    prompt: str
+    image: Optional[str] = None
+    model: Optional[str] = "dall-e-3"
+    n: Optional[int] = 1
+    size: Optional[str] = "1024x1024"
+    response_format: Optional[str] = "url"  # "url" or "b64_json"
