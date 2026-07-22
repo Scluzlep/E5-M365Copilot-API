@@ -349,8 +349,10 @@ def _msg_attr(m, attr, default=None):
     return getattr(m, attr, default)
 
 
-def messages_to_prompt(messages: List[Union[ChatMessage, dict]]) -> str:
-    """Flatten an OpenAI ``messages`` array into a single Copilot prompt, with tool calling support."""
+def messages_to_prompt(messages: List[Union[ChatMessage, dict]], tools: Optional[List[dict]] = None, provider: str = "openai") -> str:
+    """Flatten an OpenAI/Claude/Responses ``messages`` array into a single Copilot prompt, with simulated tool calling support."""
+    from .tool_sim import flatten_tools, build_simulation_prompt
+
     system = "\n\n".join(
         content_text(_msg_attr(m, "content")) for m in messages if _msg_attr(m, "role") == "system" and _msg_attr(m, "content")
     )
@@ -363,7 +365,7 @@ def messages_to_prompt(messages: List[Union[ChatMessage, dict]]) -> str:
         for m in convo:
             role = _msg_attr(m, "role", "")
             content = _msg_attr(m, "content")
-            if role == "tool":
+            if role == "tool" or role == "user" and _msg_attr(m, "tool_call_id"):
                 tid = _msg_attr(m, "tool_call_id", "") or "unknown"
                 lines.append(f"[Assistant Tool Call Output] (id: {tid}):\n{content_text(content)}")
             elif role == "assistant":
@@ -385,7 +387,7 @@ def messages_to_prompt(messages: List[Union[ChatMessage, dict]]) -> str:
                 label = "User" if role == "user" else role.capitalize() if role else "User"
                 lines.append(f"{label}: {content_text(content)}")
 
-        if convo and _msg_attr(convo[-1], "role") == "tool":
+        if convo and (_msg_attr(convo[-1], "role") == "tool" or (_msg_attr(convo[-1], "role") == "user" and _msg_attr(convo[-1], "tool_call_id"))):
             lines.append(
                 "\n[System Guidance]\n"
                 "The tool action you requested has been executed and the result is provided above inside [Assistant Tool Call Output].\n"
@@ -396,6 +398,12 @@ def messages_to_prompt(messages: List[Union[ChatMessage, dict]]) -> str:
             lines.append("Assistant:")  # cue Copilot to continue
         body = "\n".join(lines)
 
-    if system and body:
-        return f"{system}\n\n{body}"
-    return system or body
+    base_prompt = f"{system}\n\n{body}" if system and body else (system or body)
+
+    if tools:
+        tools_map = flatten_tools(tools)
+        sim_prompt = build_simulation_prompt(base_prompt, tools_map, provider=provider)
+        return sim_prompt
+
+    return base_prompt
+

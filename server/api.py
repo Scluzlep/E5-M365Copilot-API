@@ -21,9 +21,10 @@ from .openai_format import (
     sse_event,
     stream_chunk,
 )
-from .schemas import ChatCompletionRequest, ClaudeMessageRequest, ImageGenerationRequest, ImageEditRequest
+from .schemas import ChatCompletionRequest, ClaudeMessageRequest, ImageGenerationRequest, ImageEditRequest, ResponsesRequest
 from server.prompt import messages_to_prompt, extract_files
 from server.router import router
+from .tool_sim import parse_simulation_result
 from .claude_format import (
     message_response,
     new_msg_id,
@@ -31,9 +32,12 @@ from .claude_format import (
     stream_content_block_start,
     stream_content_block_delta,
     stream_content_block_stop,
+    stream_tool_use_block_start,
+    stream_input_json_delta,
     stream_message_delta,
     stream_message_stop
 )
+
 
 app = FastAPI(title="Copilot OpenAI-compatible API", version="1.0.0")
 security = HTTPBearer(auto_error=False)
@@ -186,17 +190,11 @@ class StreamCleaner:
         self.buffer = ""
         return result
 
-def _stream(session, prompt: str, model: str, messages: list, conversation_id=None, plugins=None, files=None, api_key: str = ""):
-    """Yield OpenAI ``chat.completion.chunk`` SSE events for ``prompt``.
-
-    ``conversation_id`` continues an existing Copilot thread; ``None`` starts a
-    fresh one (its id is emitted on the final chunk).
-    """
+def _stream(session, prompt: str, model: str, messages: list, conversation_id=None, plugins=None, files=None, api_key: str = "", declared_tools: list = None):
+    """Yield OpenAI ``chat.completion.chunk`` SSE events for ``prompt``."""
     cid = new_id()
     created = int(time.time())
     
-    # We delay yielding the initial role chunk until we successfully get the first item from Copilot.
-    # This allows auth errors to propagate up before any SSE events are sent, enabling seamless session fallback.
     stream = session.client.stream(prompt, conversation_id=conversation_id, model=model, plugins=plugins, e5_attachments=files)
     
     stream_iter = iter(stream)
@@ -208,17 +206,20 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
     yield sse_event(stream_chunk(cid, created, model, {"role": "assistant"}))
     
     try:
+        raw_text = ""
         final_text = ""
         final_thought = ""
         cleaner = StreamCleaner()
         
         def process_piece(piece):
-            nonlocal final_text, final_thought
+            nonlocal raw_text, final_text, final_thought
             if isinstance(piece, str) and piece:
-                cleaned_piece = cleaner.process(piece)
-                final_text += cleaned_piece
-                if cleaned_piece:
-                    return sse_event(stream_chunk(cid, created, model, {"content": cleaned_piece}))
+                raw_text += piece
+                if not declared_tools:
+                    cleaned_piece = cleaner.process(piece)
+                    final_text += cleaned_piece
+                    if cleaned_piece:
+                        return sse_event(stream_chunk(cid, created, model, {"content": cleaned_piece}))
             elif isinstance(piece, dict):
                 if "thought" in piece:
                     final_thought += piece["thought"]
@@ -227,8 +228,10 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
                     cleaner.add_citations(piece["citations"])
             elif isinstance(piece, ImageResponse) and piece.url:
                 markdown_img = f"\n\n![Generated Image]({piece.url})\n\n"
-                final_text += markdown_img
-                return sse_event(stream_chunk(cid, created, model, {"content": markdown_img}))
+                raw_text += markdown_img
+                if not declared_tools:
+                    final_text += markdown_img
+                    return sse_event(stream_chunk(cid, created, model, {"content": markdown_img}))
             return None
 
         if first_item:
@@ -239,37 +242,53 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
             res = process_piece(piece)
             if res: yield res
         
-        # Flush any remaining text in the cleaner
-        flushed = cleaner.flush()
-        if flushed:
-            final_text += flushed
-            yield sse_event(stream_chunk(cid, created, model, {"content": flushed}))
+        if declared_tools:
+            sim_res = parse_simulation_result(raw_text, declared_tools, provider="openai")
+            if sim_res["tool_calls"]:
+                tool_calls_payload = []
+                for i, tc in enumerate(sim_res["tool_calls"]):
+                    tool_calls_payload.append({
+                        "index": i,
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["arguments"])
+                        }
+                    })
+                
+                out_content = sim_res["content"]
+                if out_content:
+                    cleaned_out = cleaner.process(out_content) + cleaner.flush()
+                    final_text = cleaned_out
+                    yield sse_event(stream_chunk(cid, created, model, {"content": cleaned_out}))
+                    
+                yield sse_event(stream_chunk(cid, created, model, {"tool_calls": tool_calls_payload}, finish="tool_calls"))
+            else:
+                out_content = sim_res["content"] or raw_text
+                cleaned_out = cleaner.process(out_content) + cleaner.flush()
+                final_text = cleaned_out
+                yield sse_event(stream_chunk(cid, created, model, {"content": cleaned_out}, finish="stop"))
+        else:
+            flushed = cleaner.flush()
+            if flushed:
+                final_text += flushed
+                yield sse_event(stream_chunk(cid, created, model, {"content": flushed}))
+            yield sse_event(
+                stream_chunk(
+                    cid, created, model, {}, finish="stop",
+                    conversation_id=stream.conversation_id,
+                )
+            )
         
-        # Save the new state so future requests can continue seamlessly
         if stream.conversation_id:
             from .schemas import ChatMessage
             updated_messages = messages + [ChatMessage(role="assistant", content=final_text, reasoning_content=final_thought if final_thought else None)]
             new_head_hash = router._hash_messages(updated_messages)
             router.save_state(new_head_hash, stream.conversation_id, session.session_name, api_key=api_key)
 
-        # Copilot's conversation id is known once the stream has run; emit it
-        yield sse_event(
-            stream_chunk(
-                cid, created, model, {}, finish="stop",
-                conversation_id=stream.conversation_id,
-            )
-        )
     except RateLimitExceeded as exc:
         secs = max(1, round(exc.wait_seconds))
-        err_json = {
-            "error": {
-                "message": f"Rate limit exceeded. Retry in {secs}s.",
-                "type": "rate_limit_error",
-                "code": "rate_limit_exceeded"
-            }
-        }
-        # SSE format for openai errors is sometimes yielded in the 'error' field or as a JSON body,
-        # but since stream started, we just yield it as a pseudo message.
         yield sse_event(stream_chunk(cid, created, model, {"content": f"\n[error: rate limit exceeded, retry in {secs}s]"}, finish="error"))
     except Exception as exc:  # surface errors to the client instead of hanging
         import traceback, sys
@@ -280,7 +299,7 @@ def _stream(session, prompt: str, model: str, messages: list, conversation_id=No
     yield "data: [DONE]\n\n"
 
 
-def _stream_claude(session, prompt: str, model: str, messages: list, plugins=None, conversation_id=None, files=None, api_key: str = ""):
+def _stream_claude(session, prompt: str, model: str, messages: list, plugins=None, conversation_id=None, files=None, api_key: str = "", declared_tools: list = None):
     """Yield Anthropic Claude SSE events for ``prompt``."""
     msg_id = new_msg_id()
     
@@ -293,41 +312,36 @@ def _stream_claude(session, prompt: str, model: str, messages: list, plugins=Non
         first_item = None
 
     yield stream_message_start(msg_id, model)
-    yield stream_content_block_start(index=0)
+    if not declared_tools:
+        yield stream_content_block_start(index=0)
     
     try:
+        raw_text = ""
         final_text = ""
         final_thought = ""
         cleaner = StreamCleaner()
-        in_thought = False
         
         def process_piece(piece):
-            nonlocal final_text, final_thought, in_thought
+            nonlocal raw_text, final_text, final_thought
             res = []
             if isinstance(piece, str) and piece:
-                if in_thought:
-                    res.append(stream_content_block_delta(index=0, text="\n</thinking>\n\n"))
-                    in_thought = False
-                cleaned_piece = cleaner.process(piece)
-                final_text += cleaned_piece
-                if cleaned_piece:
-                    res.append(stream_content_block_delta(index=0, text=cleaned_piece))
+                raw_text += piece
+                if not declared_tools:
+                    cleaned_piece = cleaner.process(piece)
+                    final_text += cleaned_piece
+                    if cleaned_piece:
+                        res.append(stream_content_block_delta(index=0, text=cleaned_piece))
             elif isinstance(piece, dict):
                 if "thought" in piece:
-                    if not in_thought:
-                        res.append(stream_content_block_delta(index=0, text="<thinking>\n"))
-                        in_thought = True
                     final_thought += piece["thought"]
-                    res.append(stream_content_block_delta(index=0, text=piece["thought"]))
                 elif "citations" in piece:
                     cleaner.add_citations(piece["citations"])
             elif isinstance(piece, ImageResponse) and piece.url:
-                if in_thought:
-                    res.append(stream_content_block_delta(index=0, text="\n</thinking>\n\n"))
-                    in_thought = False
                 markdown_img = f"\n\n![Generated Image]({piece.url})\n\n"
-                final_text += markdown_img
-                res.append(stream_content_block_delta(index=0, text=markdown_img))
+                raw_text += markdown_img
+                if not declared_tools:
+                    final_text += markdown_img
+                    res.append(stream_content_block_delta(index=0, text=markdown_img))
             return res
 
         if first_item:
@@ -336,16 +350,40 @@ def _stream_claude(session, prompt: str, model: str, messages: list, plugins=Non
         for piece in stream_iter:
             for r in process_piece(piece): yield r
             
-        flushed = cleaner.flush()
-        if flushed:
-            if in_thought:
-                yield stream_content_block_delta(index=0, text="\n</thinking>\n\n")
-                in_thought = False
-            final_text += flushed
-            yield stream_content_block_delta(index=0, text=flushed)
-            
-        if in_thought:
-            yield stream_content_block_delta(index=0, text="\n</thinking>\n")
+        if declared_tools:
+            sim_res = parse_simulation_result(raw_text, declared_tools, provider="anthropic")
+            if sim_res["tool_calls"]:
+                block_idx = 0
+                out_content = sim_res["content"]
+                if out_content:
+                    cleaned_out = cleaner.process(out_content) + cleaner.flush()
+                    final_text = cleaned_out
+                    yield stream_content_block_start(index=block_idx)
+                    yield stream_content_block_delta(index=block_idx, text=cleaned_out)
+                    yield stream_content_block_stop(index=block_idx)
+                    block_idx += 1
+                    
+                for tc in sim_res["tool_calls"]:
+                    yield stream_tool_use_block_start(index=block_idx, tool_id=tc["id"], name=tc["name"])
+                    yield stream_input_json_delta(index=block_idx, partial_json=json.dumps(tc["arguments"]))
+                    yield stream_content_block_stop(index=block_idx)
+                    block_idx += 1
+                yield stream_message_delta(stop_reason="tool_use")
+            else:
+                out_content = sim_res["content"] or raw_text
+                cleaned_out = cleaner.process(out_content) + cleaner.flush()
+                final_text = cleaned_out
+                yield stream_content_block_start(index=0)
+                yield stream_content_block_delta(index=0, text=cleaned_out)
+                yield stream_content_block_stop(index=0)
+                yield stream_message_delta(stop_reason="end_turn")
+        else:
+            flushed = cleaner.flush()
+            if flushed:
+                final_text += flushed
+                yield stream_content_block_delta(index=0, text=flushed)
+            yield stream_content_block_stop(index=0)
+            yield stream_message_delta(stop_reason="end_turn")
 
         if stream.conversation_id:
             from .schemas import ChatMessage
@@ -353,21 +391,21 @@ def _stream_claude(session, prompt: str, model: str, messages: list, plugins=Non
             new_head_hash = router._hash_messages(updated_messages)
             router.save_state(new_head_hash, stream.conversation_id, session.session_name, api_key=api_key)
 
-        yield stream_content_block_stop(index=0)
-        yield stream_message_delta(stop_reason="end_turn")
         yield stream_message_stop()
         
     except RateLimitExceeded as exc:
         secs = max(1, round(exc.wait_seconds))
-        yield stream_content_block_delta(index=0, text=f"\n[error: rate limit exceeded, retry in {secs}s]")
-        yield stream_content_block_stop(index=0)
+        if not declared_tools:
+            yield stream_content_block_delta(index=0, text=f"\n[error: rate limit exceeded, retry in {secs}s]")
+            yield stream_content_block_stop(index=0)
         yield stream_message_delta(stop_reason="error")
         yield stream_message_stop()
     except Exception as exc:
         import traceback, sys
         print(mask_token(f"[stream error] {traceback.format_exc()}"), file=sys.stderr)
-        yield stream_content_block_delta(index=0, text="\n[error: upstream request failed]")
-        yield stream_content_block_stop(index=0)
+        if not declared_tools:
+            yield stream_content_block_delta(index=0, text="\n[error: upstream request failed]")
+            yield stream_content_block_stop(index=0)
         yield stream_message_delta(stop_reason="error")
         yield stream_message_stop()
 
@@ -413,17 +451,12 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
     model = req.model or MODEL_NAME
 
     plugins = req.plugins or []
-    if req.tools:
-        for t in req.tools:
-            if isinstance(t, dict):
-                fn = t.get("function", {})
-                name = fn.get("name") if isinstance(fn, dict) else None
-                if name:
-                    plugins.append(name)
-            elif isinstance(t, str):
-                plugins.append(t)
     if not plugins:
         plugins = None
+
+    # If simulated tools are requested, re-build prompt with simulation instructions
+    if req.tools:
+        prompt = messages_to_prompt(req.messages, tools=req.tools, provider="openai")
 
     try:
         if req.stream:
@@ -438,12 +471,10 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                         with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
                             try:
                                 if preferred_session and session.session_name != preferred_session:
-                                    # We fell back to a different account; Copilot conversation IDs are tied to accounts,
-                                    # so we must start a fresh conversation instead of failing.
                                     conversation_id = None
                                     
                                 print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
-                                yield from _stream(session, prompt, model, req.messages, conversation_id, plugins, files=files, api_key=api_key)
+                                yield from _stream(session, prompt, model, req.messages, conversation_id, plugins, files=files, api_key=api_key, declared_tools=req.tools)
                                 return  # Success, exit retry loop
                             except RuntimeError as e:
                                 if "Disengaged" in str(e):
@@ -459,9 +490,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                                     continue
                                 if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
                                     print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
-                                    # Force this session to be unhealthy by removing its token, so the next acquire picks a different session
                                     session.client.invalidate_auth()
-                                    # Clear preferred_session so pool.acquire_session is free to pick the next best healthy session
                                     preferred_session = None
                                     if attempt == max_retries - 1:
                                         raise
@@ -501,8 +530,6 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                     with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
                         try:
                             if preferred_session and session.session_name != preferred_session:
-                                # We fell back to a different account; Copilot conversation IDs are tied to accounts,
-                                # so we must start a fresh conversation instead of failing.
                                 conversation_id = None
                                 
                             print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
@@ -521,9 +548,7 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                                 continue
                             if "Failed to decode oid/tid" in str(e) or "rate limit" in str(e).lower():
                                 print(f"[API] Session fallback triggered (attempt {attempt+1}/{max_retries}) due to: {e}")
-                                # Force this session to be unhealthy by removing its token, so the next acquire picks a different session
                                 session.client.invalidate_auth()
-                                # Clear preferred_session so pool.acquire_session is free to pick the next best healthy session
                                 preferred_session = None
                                 if attempt == max_retries - 1:
                                     raise
@@ -560,7 +585,36 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                 updated_messages = req.messages + [ChatMessage(role="assistant", content=final_text)]
                 new_head_hash = router._hash_messages(updated_messages)
                 router.save_state(new_head_hash, reply.conversation_id, session.session_name, api_key=api_key)
+
+            if req.tools:
+                sim_res = parse_simulation_result(final_text, req.tools, provider="openai")
+                if sim_res["tool_calls"]:
+                    tool_calls = [{
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["arguments"])
+                        }
+                    } for tc in sim_res["tool_calls"]]
+                    return JSONResponse({
+                        "id": f"chatcmpl-{new_id()}",
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": sim_res["content"] or None,
+                                "tool_calls": tool_calls
+                            },
+                            "finish_reason": "tool_calls"
+                        }]
+                    })
+
             return completion_response(final_text, model, reply.conversation_id)
+
     except RateLimitExceeded as exc:
         secs = max(1, round(exc.wait_seconds))
         return JSONResponse(
@@ -623,6 +677,9 @@ def claude_messages(
         
     model = req.model or MODEL_NAME
 
+    if req.tools:
+        prompt = messages_to_prompt(standard_messages, tools=req.tools, provider="anthropic")
+
     if req.stream:
         def stream_wrapper():
             nonlocal preferred_session, conversation_id
@@ -635,7 +692,7 @@ def claude_messages(
                                 conversation_id = None
                                 
                             print(f"[API] Using session: {session.session_name} ({session.get_email()}) | conversation_id: {conversation_id}")
-                            yield from _stream_claude(session, prompt, model, standard_messages, plugins=None, conversation_id=conversation_id, files=files, api_key=api_key)
+                            yield from _stream_claude(session, prompt, model, standard_messages, plugins=None, conversation_id=conversation_id, files=files, api_key=api_key, declared_tools=req.tools)
                             return
                         except RuntimeError as e:
                             if "Disengaged" in str(e):
@@ -757,8 +814,113 @@ def claude_messages(
             updated_messages = standard_messages + [ChatMessage(role="assistant", content=final_text)]
             new_head_hash = router._hash_messages(updated_messages)
             router.save_state(new_head_hash, reply.conversation_id, session.session_name, api_key=api_key)
-                    
-        return message_response(final_text, model)
+
+        if req.tools:
+            sim_res = parse_simulation_result(final_text, req.tools, provider="anthropic")
+            if sim_res["tool_calls"]:
+                content_blocks = []
+                if sim_res["content"]:
+                    content_blocks.append({"type": "text", "text": sim_res["content"]})
+                for tc in sim_res["tool_calls"]:
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tc["id"],
+                        "name": tc["name"],
+                        "input": tc["arguments"]
+                    })
+                return JSONResponse({
+                    "id": new_msg_id(),
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": content_blocks,
+                    "stop_reason": "tool_use",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0}
+                })
+
+@app.post("/v1/responses")
+def openai_responses(
+    req: ResponsesRequest,
+    creds: HTTPAuthorizationCredentials = Depends(security),
+    x_api_key: str = Header(None)
+):
+    api_key = x_api_key or (creds.credentials if creds else None)
+    if not api_key:
+        return JSONResponse(status_code=401, content={"error": {"message": "Missing API Key", "type": "authentication_error"}})
+
+    from .schemas import ChatMessage
+    standard_messages = []
+    if req.instructions:
+        standard_messages.append(ChatMessage(role="system", content=req.instructions))
+
+    if isinstance(req.input, str):
+        standard_messages.append(ChatMessage(role="user", content=req.input))
+    elif isinstance(req.input, list):
+        for item in req.input:
+            if isinstance(item, str):
+                standard_messages.append(ChatMessage(role="user", content=item))
+            elif isinstance(item, dict):
+                role = item.get("role", "user")
+                content = item.get("content") or item.get("text", "")
+                standard_messages.append(ChatMessage(role=role, content=content))
+
+    try:
+        conversation_id, prompt, new_head_hash, preferred_session = router.route(
+            api_key=api_key,
+            messages=standard_messages,
+            client_provided_cid=req.conversation_id
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=401, content={"error": {"message": str(e), "type": "authentication_error"}})
+
+    if req.tools:
+        prompt = messages_to_prompt(standard_messages, tools=req.tools, provider="responses")
+
+    model = req.model or MODEL_NAME
+
+    try:
+        with pool.acquire_session(api_key, preferred_session=preferred_session) as session:
+            reply = session.client.chat(prompt, conversation_id=conversation_id, model=model)
+            
+            sim_res = parse_simulation_result(reply.text, req.tools, provider="responses") if req.tools else None
+            
+            output_item = None
+            if sim_res and sim_res["tool_calls"]:
+                tc = sim_res["tool_calls"][0]
+                output_item = {
+                    "id": f"item_{uuid.uuid4().hex[:8]}",
+                    "type": "function_call",
+                    "name": tc["name"],
+                    "call_id": tc["id"],
+                    "arguments": json.dumps(tc["arguments"])
+                }
+            else:
+                out_text = sim_res["content"] if (sim_res and sim_res["content"]) else reply.text
+                output_item = {
+                    "id": f"item_{uuid.uuid4().hex[:8]}",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": out_text
+                        }
+                    ]
+                }
+                
+            return JSONResponse({
+                "id": f"resp_{uuid.uuid4().hex[:12]}",
+                "object": "response",
+                "created_at": int(time.time()),
+                "model": model,
+                "output_item": output_item,
+                "status": "completed"
+            })
+    except Exception as exc:
+        import traceback, sys
+        print(mask_token(f"[responses error] {traceback.format_exc()}"), file=sys.stderr)
+        return JSONResponse(status_code=502, content={"error": {"message": "upstream request failed", "type": "upstream_error"}})
 
 
 @app.post("/v1/images/generations")

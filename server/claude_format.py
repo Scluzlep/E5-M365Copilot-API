@@ -83,8 +83,33 @@ def stream_message_delta(stop_reason: str = "end_turn") -> str:
     }
     return sse_event("message_delta", payload)
 
+def stream_tool_use_block_start(index: int, tool_id: str, name: str) -> str:
+    payload = {
+        "type": "content_block_start",
+        "index": index,
+        "content_block": {
+            "type": "tool_use",
+            "id": tool_id,
+            "name": name,
+            "input": {}
+        }
+    }
+    return sse_event("content_block_start", payload)
+
+def stream_input_json_delta(index: int, partial_json: str) -> str:
+    payload = {
+        "type": "content_block_delta",
+        "index": index,
+        "delta": {
+            "type": "input_json_delta",
+            "partial_json": partial_json
+        }
+    }
+    return sse_event("content_block_delta", payload)
+
 def stream_message_stop() -> str:
     payload = {
         "type": "message_stop"
     }
     return sse_event("message_stop", payload)
+

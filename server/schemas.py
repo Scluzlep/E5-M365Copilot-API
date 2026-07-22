@@ -41,6 +41,8 @@ class ClaudeMessageRequest(BaseModel):
     stream: bool = False
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
+    tools: Optional[List[Any]] = None
+
 
 
 class ImageGenerationRequest(BaseModel):
@@ -60,3 +62,13 @@ class ImageEditRequest(BaseModel):
     n: Optional[int] = 1
     size: Optional[str] = "1024x1024"
     response_format: Optional[str] = "url"  # "url" or "b64_json"
+
+
+class ResponsesRequest(BaseModel):
+    model: Optional[str] = MODEL_NAME
+    input: Optional[Union[str, List[Any]]] = None
+    instructions: Optional[str] = None
+    tools: Optional[List[Any]] = None
+    stream: bool = False
+    conversation_id: Optional[str] = None
+
