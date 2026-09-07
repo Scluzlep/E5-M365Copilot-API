@@ -1,21 +1,35 @@
 .git
+.github
+.idea/
+.vscode/
 venv/
 .venv/
 __pycache__/
 *.py[cod]
+.browsers/
 docs/
+*.md
+*.curl
+.env
+.env*
 config.json
 accounts.json
 test.py
 main.py
 check_*.py
+test_*.py
 parse_har.py
+parse_doc.py
 *.txt
 !requirements.txt
-# Keep session secrets (cookies + token) out of the built image. Compose
-# bind-mounts ./session back in at runtime, so the server still sees it.
+# Keep session secrets and tokens out of the built image
 session/
 sessions/
+session1/
+token/
 conversations.json
 tests/
 examples/
+Dockerfile
+docker-compose.yml
+
