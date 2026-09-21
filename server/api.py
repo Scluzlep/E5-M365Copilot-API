@@ -5,6 +5,7 @@ import asyncio
 import secrets
 import os
 import json
+import uuid
 
 from fastapi import FastAPI, Depends, BackgroundTasks, HTTPException, status, WebSocket, Request, Header
 from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
