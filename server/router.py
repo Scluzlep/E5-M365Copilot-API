@@ -61,13 +61,10 @@ class ConversationRouter:
                 "active_heads": self.active_heads
             }
         
-        import json, os
+        import json
+        from copilot.atomic_write import write_text_atomic
         try:
-            os.makedirs("sessions", exist_ok=True)
-            tmp_path = self.persist_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
-            os.replace(tmp_path, self.persist_path)
+            write_text_atomic(self.persist_path, json.dumps(data, ensure_ascii=False, indent=2), durable=True)
         except Exception as e:
             import sys
             print(f"[router] Failed to persist state: {e}", file=sys.stderr)

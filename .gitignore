@@ -22,6 +22,10 @@ main.py
 CLAUDE.md
 check_*.py
 parse_har.py
+parse_doc.py
+test_ai.py
+test_azure.py
+*.curl
 *.txt
 !requirements.txt
 

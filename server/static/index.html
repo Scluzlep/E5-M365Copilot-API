@@ -233,6 +233,30 @@
         </div>
     </div>
 
+    <!-- PKCE Modal -->
+    <div class="modal-overlay" id="pkce-modal">
+        <div class="modal" style="width: 480px; text-align: left;">
+            <h3 style="margin-top: 0;">🔑 M365 PKCE 免浏览器授权登录</h3>
+            <p style="font-size: 13px; color: #555;">为 Session <strong id="pkce-session-name"></strong> 获取无限滑动续期的官方 Refresh Token，纯 HTTP 续期，无需打开无头浏览器。</p>
+            
+            <div style="margin-bottom: 12px;">
+                <label class="form-label">步骤 1: 点击打开微软官方授权页并登录</label>
+                <button class="primary-btn" id="pkce-open-btn" style="width: 100%; margin-top: 4px;" onclick="window.open(window._pkceAuthUrl, '_blank')">🌐 打开微软登录页面 (新标签页)</button>
+            </div>
+
+            <div style="margin-bottom: 12px;">
+                <label class="form-label">步骤 2: 登录成功后，复制浏览器地址栏的完整 URL 粘贴到下方</label>
+                <input type="text" id="pkce-redirect-url" class="form-control" placeholder="https://login.microsoftonline.com/common/oauth2/nativeclient?code=...">
+            </div>
+
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 15px;">
+                <button style="background: #e5e7eb; border: none; cursor: pointer; border-radius: 4px; padding: 6px 12px;" onclick="closePkceModal()">取消</button>
+                <button class="primary-btn" id="pkce-submit-btn" onclick="submitPkceExchange()">完成授权换码</button>
+            </div>
+            <div id="pkce-status" style="margin-top: 10px; font-size: 13px;"></div>
+        </div>
+    </div>
+
     <h1>Copilot API 控制台</h1>
     <div class="container">
         <!-- Accounts Panel -->
@@ -458,6 +482,16 @@
                     }
                     tagText.onclick = () => launchVnc(s);
 
+                    const pkceBtn = document.createElement('span');
+                    pkceBtn.innerText = '🔑';
+                    pkceBtn.title = "使用 M365 Native App PKCE 免浏览器授权登录";
+                    pkceBtn.style.cursor = 'pointer';
+                    pkceBtn.style.marginLeft = '4px';
+                    pkceBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        openPkceModal(s);
+                    };
+
                     const delBtn = document.createElement('div');
                     delBtn.className = 'session-del';
                     delBtn.innerText = '×';
@@ -465,6 +499,7 @@
                     delBtn.onclick = () => deleteSession(key, s);
 
                     tag.appendChild(tagText);
+                    tag.appendChild(pkceBtn);
                     tag.appendChild(delBtn);
                     sList.appendChild(tag);
                 });
@@ -506,6 +541,76 @@
             await fetch(`/api/accounts/${encodeURIComponent(key)}/${encodeURIComponent(sessionName)}`, { method: 'DELETE' });
             loadAccounts();
             loadAzureConfig();
+        }
+
+        async function openPkceModal(sessionName) {
+            window._currentPkceSession = sessionName;
+            document.getElementById('pkce-session-name').innerText = sessionName;
+            document.getElementById('pkce-redirect-url').value = '';
+            document.getElementById('pkce-status').innerText = '正在生成微软官方授权链接...';
+            document.getElementById('pkce-status').style.color = '#2563eb';
+            document.getElementById('pkce-modal').style.display = 'flex';
+            
+            try {
+                const res = await fetch('/api/pkce/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_name: sessionName, authority: 'common' })
+                });
+                const ret = await res.json();
+                if (ret.success && ret.data && ret.data.authorize_url) {
+                    window._pkceAuthUrl = ret.data.authorize_url;
+                    document.getElementById('pkce-status').innerText = '✅ 授权链接就绪，请点击上方按钮前往微软官方页面登录。';
+                } else {
+                    document.getElementById('pkce-status').innerText = '❌ 生成链接失败: ' + (ret.error || '未知错误');
+                    document.getElementById('pkce-status').style.color = '#ef4444';
+                }
+            } catch (err) {
+                document.getElementById('pkce-status').innerText = '❌ 网络请求异常: ' + err.message;
+                document.getElementById('pkce-status').style.color = '#ef4444';
+            }
+        }
+
+        function closePkceModal() {
+            document.getElementById('pkce-modal').style.display = 'none';
+        }
+
+        async function submitPkceExchange() {
+            const redirectUrl = document.getElementById('pkce-redirect-url').value.trim();
+            if (!redirectUrl) {
+                alert('请粘贴登录后的完整 URL！');
+                return;
+            }
+            const statusEl = document.getElementById('pkce-status');
+            statusEl.innerText = '正在向微软兑换 Refresh Token...';
+            statusEl.style.color = '#2563eb';
+
+            try {
+                const res = await fetch('/api/pkce/exchange', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_name: window._currentPkceSession,
+                        redirect_url: redirectUrl,
+                        authority: 'common'
+                    })
+                });
+                const ret = await res.json();
+                if (ret.success) {
+                    statusEl.innerText = '✅ ' + (ret.message || '授权登录成功！');
+                    statusEl.style.color = '#16a34a';
+                    setTimeout(() => {
+                        closePkceModal();
+                        loadAccounts();
+                    }, 1200);
+                } else {
+                    statusEl.innerText = '❌ 授权失败: ' + (ret.error || '兑换失败');
+                    statusEl.style.color = '#ef4444';
+                }
+            } catch (err) {
+                statusEl.innerText = '❌ 网络请求异常: ' + err.message;
+                statusEl.style.color = '#ef4444';
+            }
         }
 
         async function addAccount() {

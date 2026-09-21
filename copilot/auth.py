@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from .atomic_write import write_text_atomic
+
 # All session state (browser profile + cached auth) lives under one folder.
 SESSION_DIR = "session"
 DEFAULT_PROFILE_DIR = f"{SESSION_DIR}/profile"
@@ -99,8 +101,7 @@ def reauth_with_sso(cached: dict, path: str = DEFAULT_AUTH_FILE) -> Optional[dic
                 cached["refresh_token"] = token_json.get("refresh_token", cached.get("refresh_token"))
                 cached["saved_at"] = time.time()
                 cached["login_at"] = time.time()
-                Path(path).parent.mkdir(parents=True, exist_ok=True)
-                Path(path).write_text(json.dumps(cached, indent=2), encoding="utf-8")
+                write_text_atomic(path, json.dumps(cached, indent=2), durable=True)
                 print("[Auth] Successfully refreshed access token via silent SSO cookies!")
                 return cached
     except Exception as e:
@@ -194,8 +195,7 @@ def load_auth(
                     cached["saved_at"] = time.time()
                     if "login_at" not in cached:
                         cached["login_at"] = cached.get("saved_at", time.time())
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    p.write_text(json.dumps(cached, indent=2), encoding="utf-8")
+                    write_text_atomic(p, json.dumps(cached, indent=2), durable=True)
                     print("Token refreshed via Pure API!")
                     return cached
             else:

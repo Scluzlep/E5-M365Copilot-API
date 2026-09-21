@@ -10,6 +10,8 @@ import re
 import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from copilot.tool_hygiene import deduplicate_tool_calls
+
 def flatten_tools(input_tools: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Flatten and normalize tool definitions into a lookup table by tool_name."""
     result = {}
@@ -320,6 +322,11 @@ def parse_simulation_result(text: str, declared_tools: List[Dict[str, Any]], pro
             continue
         valid_calls.append(call)
         
+    valid_calls, drop_reasons = deduplicate_tool_calls(valid_calls, by_name_and_args=True)
+    if drop_reasons:
+        for reason in drop_reasons:
+            print(f"[ToolSim] {reason}")
+
     has_calls = len(valid_calls) > 0
     finish_reason = "tool_calls" if has_calls else ("stop" if provider != "anthropic" else "end_turn")
     if provider == "anthropic" and has_calls:

@@ -39,8 +39,17 @@ from .claude_format import (
 )
 
 
+from copilot.agent_registry import get_all_models_data
+from copilot.pkce import start_pkce_login, exchange_pkce_code
+from server.sse_stream import async_sse_guard, SSE_HEADERS, ANTHROPIC_PING, SSE_KEEPALIVE_COMMENT
+
 app = FastAPI(title="Copilot OpenAI-compatible API", version="1.0.0")
 security = HTTPBearer(auto_error=False)
+
+@app.get("/v1/models")
+def list_models():
+    """Return all available models in standard OpenAI /v1/models format."""
+    return {"object": "list", "data": get_all_models_data()}
 
 import hashlib
 
@@ -518,9 +527,9 @@ def chat_completions(req: ChatCompletionRequest, creds: HTTPAuthorizationCredent
                         continue
     
             return StreamingResponse(
-                stream_wrapper(),
+                async_sse_guard(stream_wrapper(), heartbeat=SSE_KEEPALIVE_COMMENT),
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+                headers=SSE_HEADERS,
             )
         else:
             max_retries = 3
@@ -757,9 +766,9 @@ def claude_messages(
                     continue
 
         return StreamingResponse(
-            stream_wrapper(),
+            async_sse_guard(stream_wrapper(), heartbeat=ANTHROPIC_PING),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            headers=SSE_HEADERS,
         )
     else:
         max_retries = 3
@@ -1057,6 +1066,51 @@ def delete_session_from_key(api_key: str, session_name: str):
 @app.get("/api/config", dependencies=[Depends(verify_admin)])
 def get_config():
     return {"vnc_url": os.environ.get("VNC_URL", "")}
+
+
+class PkceStartRequest(BaseModel):
+    session_name: str
+    authority: str = "common"
+
+
+class PkceExchangeRequest(BaseModel):
+    session_name: str
+    redirect_url: str
+    authority: str = "common"
+
+
+@app.post("/api/pkce/start", dependencies=[Depends(verify_admin)])
+def api_pkce_start(req: PkceStartRequest):
+    try:
+        pool.add_session(req.session_name)
+        data = start_pkce_login(req.session_name, authority=req.authority)
+        return {"success": True, "data": data}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"success": False, "error": str(e)})
+
+
+@app.post("/api/pkce/exchange", dependencies=[Depends(verify_admin)])
+async def api_pkce_exchange(req: PkceExchangeRequest):
+    try:
+        tokens = await exchange_pkce_code(req.session_name, req.redirect_url, authority=req.authority)
+        sess_inst = pool.sessions.get(req.session_name)
+        if not sess_inst:
+            from .accounts import SessionInstance
+            sess_inst = SessionInstance(req.session_name)
+            pool.sessions[req.session_name] = sess_inst
+        
+        token_data = {
+            "access_token": tokens["access_token"],
+            "refresh_token": tokens.get("refresh_token"),
+            "token_type": tokens.get("token_type", "Bearer"),
+            "saved_at": time.time(),
+            "login_at": time.time(),
+            "source": "pkce",
+        }
+        sess_inst.save_token_data(token_data)
+        return {"success": True, "message": f"Session '{req.session_name}' 授权登录成功！", "email": sess_inst.get_email()}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"success": False, "error": str(e)})
 
 @app.post("/api/login", dependencies=[Depends(verify_admin)])
 def login_session(session_name: str):

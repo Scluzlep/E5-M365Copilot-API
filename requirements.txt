@@ -1,6 +1,9 @@
-curl_cffi>=0.15
-playwright>=1.60
-fastapi>=0.110
-uvicorn[standard]>=0.29
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+playwright>=1.40.0
 requests>=2.31.0
+httpx[socks]>=0.27.0
+websockets>=12.0
 msal>=1.28.0
+curl_cffi>=0.15.0
+tzdata>=2024.1

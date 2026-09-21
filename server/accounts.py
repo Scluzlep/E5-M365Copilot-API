@@ -9,6 +9,7 @@ import shutil
 
 from copilot.client import CopilotClient
 from copilot.utils import mask_token
+from copilot.atomic_write import write_text_atomic
 from .config import RATE_LIMIT_RPM, RATE_LIMIT_BURST
 from .ratelimit import TokenBucket
 
@@ -38,6 +39,15 @@ class SessionInstance:
         self.rate_limiter = TokenBucket(RATE_LIMIT_RPM, RATE_LIMIT_BURST)
         self._health_cache_time = 0
         self._health_cache_val = False
+
+    def save_token_data(self, token_data: dict) -> None:
+        """Atomically persist token data to session token.json with fsync."""
+        token_file = os.path.join(self.session_dir, "token.json")
+        payload = json.dumps(token_data, indent=2)
+        write_text_atomic(token_file, payload, durable=True)
+        # Clear health cache so is_healthy reflects new token immediately
+        self._health_cache_time = 0
+        self._health_cache_val = True
 
     def is_healthy(self) -> bool:
         """Check if the session token is present and structurally valid/unexpired. Caches for 10s."""
@@ -239,10 +249,13 @@ class AccountPool:
 
     def _save_config_unlocked(self):
         try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump({"api_keys": self.api_keys}, f, indent=4)
-        except OSError:
-            pass
+            write_text_atomic(
+                self.config_path,
+                json.dumps({"api_keys": self.api_keys}, indent=4),
+                durable=True,
+            )
+        except OSError as e:
+            print(f"[AccountPool] Failed to atomically save {self.config_path}: {e}")
             
     def get_api_keys(self) -> dict:
         with self._config_lock:

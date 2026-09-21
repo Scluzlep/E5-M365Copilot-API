@@ -1,15 +1,16 @@
 """Microsoft Copilot (E5 / Enterprise / Business Chat) Agent & Model Registry.
 
-This module provides a unified routing table mapping standard OpenAI model names
-(e.g., gpt-4o, gpt-5, o1, claude) and M365 capability titles (Word, Excel, Pages)
-to Microsoft E5 Copilot's internal WebSocket routing parameters (`gptId`, `mode`,
+This module provides a unified routing table mapping standard OpenAI/Claude model names
+to Microsoft E5 Copilot's internal Substrate WebSocket routing parameters (`gptId`, `mode`/`tone`,
 and `optionsSets`).
 """
+from __future__ import annotations
 
-from typing import Dict, Any, Optional
+import time
+from typing import Any, Dict, List, Optional
 
-# Complete E5 OptionsSets discovered from live telemetry captures (7MB session log).
-# These activate full Business Chat capabilities: code interpreter, Flux v3 image gen,
+# Complete E5 OptionsSets discovered from live telemetry captures.
+# Activates full Business Chat capabilities: code interpreter, Flux v3 image gen,
 # rich web answers, page citations, and deep reasoning flights.
 DEFAULT_E5_OPTIONS_SETS = [
     "search_result_progress_messages_with_search_queries",
@@ -45,264 +46,225 @@ DEFAULT_E5_OPTIONS_SETS = [
     "pages_citations_multiturn",
 ]
 
-AGENT_REGISTRY: Dict[str, Dict[str, Any]] = {
-    # -------------------------------------------------------------------------
-    # Standard & Fast Models (E5 自动 / 快速答复 / GPT 5.5 / 5.2 快速响应)
-    # -------------------------------------------------------------------------
-    "auto": {
-        "mode": "Magic",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "E5 自动模式 (自动决定要思考多长时间 / Auto)",
-    },
-    "fast": {
-        "mode": "Chat",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "E5 快速答复 (立即回答 / Fast Response)",
-    },
-    "gpt-5.5-fast": {
-        "mode": "Gpt_5_5_Chat",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "E5 GPT 5.5 快速响应 (Fast Response)",
-    },
+REASONING_OPTIONS_SETS = DEFAULT_E5_OPTIONS_SETS + ["Agt_bizchat_enableGpt5ForHelix"]
 
-    # -------------------------------------------------------------------------
-    # Deep Reasoning Models (E5 深度思考 / GPT 5.5 深度思考 / GPT-5)
-    # -------------------------------------------------------------------------
-    "thinking": {
-        "mode": "Reasoning",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS + ["Agt_bizchat_enableGpt5ForHelix"],
-        "description": "E5 深度思考 (思考更长时间以获得更好回答 / Deep Think)",
-    },
-    "gpt-5.5-thinking": {
-        "mode": "Gpt_5_5_Reasoning",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS + ["Agt_bizchat_enableGpt5ForHelix"],
-        "description": "E5 GPT 5.5 深度思考 (Thinking Mode)",
-    },
-    "gpt-5.6-thinking": {
-        "mode": "Gpt_5_6_Reasoning",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS + ["Agt_bizchat_enableGpt5ForHelix"],
-        "description": "E5 GPT 5.6 深度思考 (Thinking Mode)",
-    },
+# 20 Official M365 Substrate Tones verified by active tenant probing
+BASE_TONE_DEFINITIONS = [
+    {"tone": "Magic", "display": "Copilot_自动", "desc": "Copilot 自动选模 (Auto)"},
+    {"tone": "Chat", "display": "Copilot_快速答复", "desc": "Copilot 快速答复 (Fast)"},
+    {"tone": "Reasoning", "display": "Copilot_深度思考", "desc": "Copilot 深度思考 (Deep Reasoning)"},
+    {"tone": "Claude_Sonnet", "display": "claude-sonnet-4-6", "desc": "Claude Sonnet (Tool-calling verified)"},
+    {"tone": "Claude_Sonnet_Reasoning", "display": "claude-sonnet-4-5", "desc": "Claude Sonnet 思考 (Tool-calling verified)"},
+    {"tone": "Claude_Fable", "display": "claude-fable-5", "desc": "Claude Fable 5"},
+    {"tone": "Claude_Opus", "display": "claude-opus", "desc": "Claude Opus (Studio/Tools verified)"},
+    {"tone": "Gpt_6_Astra", "display": "gpt-6_Chat", "desc": "GPT-6 Astra 快速 (Chat & Studio verified)"},
+    {"tone": "Gpt_6_Reasoning", "display": "gpt-6", "desc": "GPT-6 思考 (Studio tool workflow required)"},
+    {"tone": "Gpt_5_6_Chat", "display": "gpt-5.6_Chat", "desc": "GPT 5.6 快速响应"},
+    {"tone": "Gpt_5_6_Reasoning", "display": "gpt-5.6", "desc": "GPT 5.6 深度思考"},
+    {"tone": "Gpt_5_5_Chat", "display": "gpt-5.5_Chat", "desc": "GPT 5.5 快速响应"},
+    {"tone": "Gpt_5_5_Reasoning", "display": "gpt-5.5", "desc": "GPT 5.5 深度思考"},
+    {"tone": "Gpt_5_4_Chat", "display": "gpt-5.4_Chat", "desc": "GPT 5.4 快速响应"},
+    {"tone": "Gpt_5_4_Reasoning", "display": "gpt-5.4", "desc": "GPT 5.4 深度思考"},
+    {"tone": "Gpt_5_3_Chat", "display": "gpt-5.3_Chat", "desc": "GPT 5.3 快速响应"},
+    {"tone": "Gpt_5_3_Reasoning", "display": "gpt-5.3", "desc": "GPT 5.3 深度思考"},
+    {"tone": "Gpt_5_2_Chat", "display": "gpt-5.2_Chat", "desc": "GPT 5.2 快速响应"},
+    {"tone": "Gpt_5_2_Reasoning", "display": "gpt-5.2", "desc": "GPT 5.2 深度思考"},
+    {"tone": "Grok_4_5", "display": "grok-4.5", "desc": "Grok 4.5 结构化文本"},
+]
 
-    # -------------------------------------------------------------------------
-    # Anthropic / Claude (留着先 / Keep for now in E5)
-    # -------------------------------------------------------------------------
-    # "anthropic": {
-    #     "mode": "Magic",
-    #     "gptId": "P_bbef1ffa-25db-4bb9-870d-afb22f41a4e9",
-    #     "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-    #     "description": "Anthropic Claude integrated in E5 Business Chat",
-    # },
-    # -------------------------------------------------------------------------
-    # Anthropic / Claude Tones (Reverse-engineered native Sydney tones, verified via self-id)
-    # Note: When these tones are used, gptId must be None to prevent overriding back to GPT.
-    # -------------------------------------------------------------------------
-    # "claude": {
-    #     "mode": "Claude_Sonnet",
-    #     "gptId": None,
-    #     "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-    #     "description": "Anthropic Claude Sonnet 4.5 (Native Sydney Tone)",
-    # },
-    # "claude-sonnet": {
-    #     "mode": "Claude_Sonnet",
-    #     "gptId": None,
-    #     "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-    #     "description": "Anthropic Claude Sonnet 4.5 (Native Sydney Tone)",
-    # },
-    "claude-sonnet-4.6": {
-        "mode": "Claude_Sonnet",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "Anthropic Claude Sonnet 4.6 (Native Sydney Tone)",
-    },
-    "claude-sonnet-thinking": {
-        "mode": "Claude_Sonnet_Reasoning",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS + ["Agt_bizchat_enableGpt5ForHelix"],
-        "description": "Anthropic Claude Sonnet 4.5 + Reasoning Mode",
-    },
-    "claude-opus-4.8": {
-        "mode": "Claude_Opus",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "Anthropic Claude Opus 4.8 / Subagents Mode",
-    },
-    "claude-fable-5": {
-        "mode": "Claude_Fable",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "Anthropic Claude Fable 5 General Branch in E5",
-    },
-    "claude-mythos-5": {
-        "mode": "Claude_Mythos",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "Anthropic Claude Mythos 5 in E5",
-    },
+AGENT_REGISTRY: Dict[str, Dict[str, Any]] = {}
 
-    # -------------------------------------------------------------------------
-    # GPT-5.4 / 5.3 / 5.2 / Quick / Reasoning Tones (Reverse-engineered from Substrate)
-    # -------------------------------------------------------------------------
-    "gpt-5.4": {
-        "mode": "Gpt_5_4_Reasoning",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS + ["Agt_bizchat_enableGpt5ForHelix"],
-        "description": "E5 GPT 5.4 Reasoning",
-    },
-    "gpt-5.4-thinking": {
-        "mode": "Gpt_5_4_Reasoning",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS + ["Agt_bizchat_enableGpt5ForHelix"],
-        "description": "E5 GPT 5.4 Reasoning Mode",
-    },
-    "gpt-5.4-fast": {
-        "mode": "Gpt_5_4_Quick",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "E5 GPT 5.4 Quick Mode",
-    },
-    "gpt-5.3": {
-        "mode": "Gpt_5_3_Quick",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "E5 GPT 5.3 Quick",
-    },
-    "gpt-5.3-fast": {
-        "mode": "Gpt_5_3_Quick",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "E5 GPT 5.3 Quick Mode",
-    },
-    "gpt-5.3-thinking": {
-        "mode": "Gpt_5_3_Reasoning",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS + ["Agt_bizchat_enableGpt5ForHelix"],
-        "description": "E5 GPT 5.3 Reasoning Mode",
-    },
-    "gpt-5.2": {
-        "mode": "Gpt_5_2_Quick",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "E5 GPT 5.2 Quick",
-    },
-    "gpt-5.2-fast": {
-        "mode": "Gpt_5_2_Quick",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "E5 GPT 5.2 Quick Mode",
-    },
-    "gpt-5.2-thinking": {
-        "mode": "Gpt_5_2_Reasoning",
-        "gptId": None,
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS + ["Agt_bizchat_enableGpt5ForHelix"],
-        "description": "E5 GPT 5.2 Reasoning Mode",
-    },
+# Populate base models and their '-持续' (persist session) variants
+for item in BASE_TONE_DEFINITIONS:
+    tone = item["tone"]
+    display = item["display"]
+    desc = item["desc"]
+    opts = REASONING_OPTIONS_SETS.copy() if "reasoning" in tone.lower() else DEFAULT_E5_OPTIONS_SETS.copy()
 
-    # -------------------------------------------------------------------------
-    # M365 Capability Agents (Word, Excel, PowerPoint, Designer, Pages)
-    # -------------------------------------------------------------------------
-    "word": {
-        "mode": "Magic",
-        "gptId": "word",
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "M365 Word Agent",
-    },
-    "excel": {
-        "mode": "Magic",
-        "gptId": "excel",
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "M365 Excel Agent",
-    },
-    "powerpoint": {
-        "mode": "Magic",
-        "gptId": "powerpoint",
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "M365 PowerPoint Agent",
-    },
-    "designer": {
-        "mode": "Magic",
-        "gptId": "designer",
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "M365 Designer / Image Gen Agent",
-    },
-    "pages": {
-        "mode": "Magic",
-        "gptId": "pages",
-        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-        "description": "M365 Pages Agent",
-    },
+    # Normal variant
+    AGENT_REGISTRY[display.lower()] = {
+        "mode": tone,
+        "gptId": None,
+        "optionsSets": opts.copy(),
+        "description": desc,
+        "persist_session": False,
+    }
+    # Persist variant
+    AGENT_REGISTRY[f"{display.lower()}-持续"] = {
+        "mode": tone,
+        "gptId": None,
+        "optionsSets": opts.copy(),
+        "description": f"{desc} (固定复用会话)",
+        "persist_session": True,
+    }
+    # Direct tone value variant
+    AGENT_REGISTRY[tone.lower()] = {
+        "mode": tone,
+        "gptId": None,
+        "optionsSets": opts.copy(),
+        "description": desc,
+        "persist_session": False,
+    }
+    AGENT_REGISTRY[f"{tone.lower()}-持续"] = {
+        "mode": tone,
+        "gptId": None,
+        "optionsSets": opts.copy(),
+        "description": f"{desc} (固定复用会话)",
+        "persist_session": True,
+    }
+
+# Convenient aliases
+AGENT_REGISTRY["auto"] = AGENT_REGISTRY["copilot_自动"]
+AGENT_REGISTRY["fast"] = AGENT_REGISTRY["copilot_快速答复"]
+AGENT_REGISTRY["thinking"] = AGENT_REGISTRY["copilot_深度思考"]
+AGENT_REGISTRY["copilot"] = AGENT_REGISTRY["copilot_自动"]
+AGENT_REGISTRY["claude-sonnet-4.6"] = AGENT_REGISTRY["claude-sonnet-4-6"]
+AGENT_REGISTRY["claude-opus-4.8"] = AGENT_REGISTRY["claude-opus"]
+AGENT_REGISTRY["claude-mythos-5"] = {
+    "mode": "Claude_Mythos",
+    "gptId": None,
+    "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
+    "description": "Claude Mythos 5 in E5",
+    "persist_session": False,
 }
+
+# Office capability agents
+for agent_id, desc in [
+    ("word", "M365 Word Agent"),
+    ("excel", "M365 Excel Agent"),
+    ("powerpoint", "M365 PowerPoint Agent"),
+    ("designer", "M365 Designer / Image Gen Agent"),
+    ("pages", "M365 Pages Agent"),
+]:
+    AGENT_REGISTRY[agent_id] = {
+        "mode": "Magic",
+        "gptId": agent_id,
+        "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
+        "description": desc,
+        "persist_session": False,
+    }
 
 
 def get_agent_config(model_name: Optional[str] = None) -> Dict[str, Any]:
-    """Resolve an OpenAI model string or agent title to E5 WebSocket routing parameters.
-
-    Returns a dictionary containing:
-        - `mode`: The E5 tone/mode (e.g. "Magic", "Claude_Sonnet", "Claude_Opus", "Reasoning", "Gpt_5_5_Reasoning").
-        - `gptId`: The plugin or custom agent identifier (e.g. "P_xxx", None for default or native tones).
-        - `optionsSets`: List of feature flag strings to send in setOptions / send frames.
-        - `description`: Human-readable summary of the resolved agent.
-    """
+    """Resolve a model name string to E5 WebSocket routing parameters."""
     if not model_name:
-        return AGENT_REGISTRY["auto"].copy()
+        res = AGENT_REGISTRY["copilot_自动"].copy()
+        res["persist_session"] = False
+        return res
 
     clean_name = model_name.strip().lower()
+    persist = False
+
+    # Check for persistence suffix
+    if clean_name.endswith("-持续") or clean_name.endswith(":persist"):
+        persist = True
+        clean_name = clean_name.replace("-持续", "").replace(":persist", "")
+
+    config: Optional[Dict[str, Any]] = None
 
     if clean_name in AGENT_REGISTRY:
-        return AGENT_REGISTRY[clean_name].copy()
+        config = AGENT_REGISTRY[clean_name].copy()
+    elif f"{clean_name}-持续" in AGENT_REGISTRY:
+        config = AGENT_REGISTRY[f"{clean_name}-持续"].copy()
+    else:
+        # Fuzzy matching
+        if "mythos" in clean_name:
+            config = AGENT_REGISTRY["claude-mythos-5"].copy()
+        elif "grok" in clean_name:
+            config = AGENT_REGISTRY["grok-4.5"].copy()
+        elif "gpt-6" in clean_name or "gpt6" in clean_name:
+            if "chat" in clean_name or "astra" in clean_name:
+                config = AGENT_REGISTRY["gpt-6_chat"].copy()
+            else:
+                config = AGENT_REGISTRY["gpt-6"].copy()
+        elif "5.6" in clean_name:
+            if any(k in clean_name for k in ("chat", "fast", "快速", "快速响应")):
+                config = AGENT_REGISTRY["gpt-5.6_chat"].copy()
+            else:
+                config = AGENT_REGISTRY["gpt-5.6"].copy()
+        elif "5.5" in clean_name:
+            if any(k in clean_name for k in ("chat", "fast", "快速", "快速响应")):
+                config = AGENT_REGISTRY["gpt-5.5_chat"].copy()
+            else:
+                config = AGENT_REGISTRY["gpt-5.5"].copy()
+        elif "5.4" in clean_name:
+            if any(k in clean_name for k in ("chat", "fast", "快速", "快速响应")):
+                config = AGENT_REGISTRY["gpt-5.4_chat"].copy()
+            else:
+                config = AGENT_REGISTRY["gpt-5.4"].copy()
+        elif "5.3" in clean_name:
+            if any(k in clean_name for k in ("chat", "fast", "快速", "快速响应")):
+                config = AGENT_REGISTRY["gpt-5.3_chat"].copy()
+            else:
+                config = AGENT_REGISTRY["gpt-5.3"].copy()
+        elif "5.2" in clean_name:
+            if any(k in clean_name for k in ("chat", "fast", "快速", "快速响应")):
+                config = AGENT_REGISTRY["gpt-5.2_chat"].copy()
+            else:
+                config = AGENT_REGISTRY["gpt-5.2"].copy()
+        elif "opus" in clean_name:
+            config = AGENT_REGISTRY["claude-opus"].copy()
+        elif "fable" in clean_name:
+            config = AGENT_REGISTRY["claude-fable-5"].copy()
+        elif "sonnet" in clean_name or "claude" in clean_name:
+            if any(k in clean_name for k in ("thinking", "reasoning", "4.5", "4-5")):
+                config = AGENT_REGISTRY["claude-sonnet-4-5"].copy()
+            else:
+                config = AGENT_REGISTRY["claude-sonnet-4-6"].copy()
+        elif any(k in clean_name for k in ("thinking", "deep", "reasoning", "深度思考")):
+            config = AGENT_REGISTRY["copilot_深度思考"].copy()
+        elif any(k in clean_name for k in ("fast", "chat", "快速答复", "快速响应")):
+            config = AGENT_REGISTRY["copilot_快速答复"].copy()
+        elif model_name.startswith("P_") or model_name.startswith("Agt_") or (len(model_name) == 36 and "-" in model_name):
+            config = {
+                "mode": "Magic",
+                "gptId": model_name,
+                "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
+                "description": f"Custom E5 Agent ID: {model_name}",
+                "persist_session": persist,
+            }
+        else:
+            config = AGENT_REGISTRY["copilot_自动"].copy()
 
-    # Intelligent prefix matching for E5 UI Modes & AI families
-    if "mythos" in clean_name:
-        return AGENT_REGISTRY["claude-mythos-5"].copy()
-    if "fable" in clean_name:
-        return AGENT_REGISTRY["claude-fable-5"].copy()
-    if "opus" in clean_name:
-        return AGENT_REGISTRY["claude-opus-4.8"].copy()
-    if any(p in clean_name for p in ("claude", "sonnet")):
-        if any(r in clean_name for r in ("thinking", "reasoning", "deeper")):
-            return AGENT_REGISTRY["claude-sonnet-thinking"].copy()
-        return AGENT_REGISTRY["claude-sonnet-4.6"].copy()
-    if any(p in clean_name for p in ("5.6-thinking", "5_6_reasoning")):
-        return AGENT_REGISTRY["gpt-5.6-thinking"].copy()
-    if any(p in clean_name for p in ("5.5-thinking", "5_5_reasoning", "gpt 5.5 深度思考", "5.5 深度思考")):
-        return AGENT_REGISTRY["gpt-5.5-thinking"].copy()
-    if any(p in clean_name for p in ("5.5-fast", "5_5_chat", "gpt 5.5 快速响应", "5.5 快速响应")):
-        return AGENT_REGISTRY["gpt-5.5-fast"].copy()
-    if any(p in clean_name for p in ("5.4-thinking", "5_4_reasoning")):
-        return AGENT_REGISTRY["gpt-5.4-thinking"].copy()
-    if any(p in clean_name for p in ("5.4-fast", "5_4_quick")):
-        return AGENT_REGISTRY["gpt-5.4-fast"].copy()
-    if any(p in clean_name for p in ("5.3-thinking", "5_3_reasoning")):
-        return AGENT_REGISTRY["gpt-5.3-thinking"].copy()
-    if any(p in clean_name for p in ("5.3-fast", "5_3_quick")):
-        return AGENT_REGISTRY["gpt-5.3-fast"].copy()
-    if any(p in clean_name for p in ("5.2-thinking", "5_2_reasoning")):
-        return AGENT_REGISTRY["gpt-5.2-thinking"].copy()
-    if any(p in clean_name for p in ("5.2-fast", "5_2_quick")):
-        return AGENT_REGISTRY["gpt-5.2-fast"].copy()
-    if any(p in clean_name for p in ("thinking", "deep", "reasoning", "深度思考")):
-        return AGENT_REGISTRY["thinking"].copy()
-    if any(clean_name.startswith(p) or p in clean_name for p in ("fast", "instant", "chat", "快速答复", "快速响应")):
-        return AGENT_REGISTRY["fast"].copy()
-    if any(clean_name.startswith(p) or p in clean_name for p in ("auto", "magic", "自动")):
-        return AGENT_REGISTRY["auto"].copy()
+    if persist:
+        config["persist_session"] = True
+    return config
 
-    # If the caller passed an explicit E5 plugin / custom GPT identifier (e.g. "P_1234...", "Agt_...")
-    if model_name.startswith("P_") or model_name.startswith("Agt_") or (len(model_name) == 36 and "-" in model_name):
-        return {
-            "mode": "Magic",
-            "gptId": model_name,
-            "optionsSets": DEFAULT_E5_OPTIONS_SETS.copy(),
-            "description": f"Custom E5 Agent ID: {model_name}",
-        }
 
-    # Fallback gracefully to default E5 Copilot for unrecognized model names
-    print(f"[AgentRegistry] Model '{model_name}' not found in registry; defaulting to E5 auto mode.")
-    return AGENT_REGISTRY["auto"].copy()
-
+def get_all_models_data() -> List[Dict[str, Any]]:
+    """Return all standard models in OpenAI /v1/models response format."""
+    now = int(time.time())
+    models = []
+    # 20 Base Tones x 2 Variants = 40 models
+    for item in BASE_TONE_DEFINITIONS:
+        display = item["display"]
+        models.append({
+            "id": display,
+            "object": "model",
+            "created": now,
+            "owned_by": "microsoft-copilot",
+            "permission": [],
+            "root": display,
+            "parent": None,
+        })
+        models.append({
+            "id": f"{display}-持续",
+            "object": "model",
+            "created": now,
+            "owned_by": "microsoft-copilot",
+            "permission": [],
+            "root": display,
+            "parent": None,
+        })
+    # Add capability agents and aliases
+    for extra_id in ["word", "excel", "powerpoint", "designer", "pages", "auto", "fast", "thinking", "claude-sonnet-4.6"]:
+        models.append({
+            "id": extra_id,
+            "object": "model",
+            "created": now,
+            "owned_by": "microsoft-m365" if extra_id in ["word", "excel", "powerpoint", "designer", "pages"] else "microsoft-copilot",
+            "permission": [],
+            "root": extra_id,
+            "parent": None,
+        })
+    return models
